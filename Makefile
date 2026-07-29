@@ -1,6 +1,9 @@
 default_target: local
 
-COMMIT_HASH := $(shell git log -1 --pretty=format:"%h"|tail -1)
+# Keep image tags and the generated runtime version reproducible across shallow
+# clones and repositories with different object counts. Git's adaptive `%h`
+# abbreviation is not a stable artifact identifier.
+COMMIT_HASH := $(shell git rev-parse --short=12 HEAD)
 VERSION = 0.18.0
 IMAGE_REPO ?= ghcr.io/blakeblackshear/frigate
 GITHUB_REF_NAME ?= $(shell git rev-parse --abbrev-ref HEAD)
