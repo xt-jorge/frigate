@@ -48,6 +48,7 @@ class CameraState:
         self._last_frame_shape: tuple[int, int] = self.camera_config.frame_shape_yuv
         self.current_frame_lock = threading.Lock()
         self.current_frame_time = 0.0
+        self._current_frame_vehicles: tuple[tuple[int, int, int, int], ...] = ()
         self.motion_boxes: list[tuple[int, int, int, int]] = []
         self.regions: list[tuple[int, int, int, int]] = []
         self.previous_frame_id: str | None = None
@@ -76,6 +77,16 @@ class CameraState:
         ):
             # A plate is a smaller fraction of a vehicle box; use ~20x multiplier
             self.lpr_min_obj_area = self.camera_config.lpr.min_area * 20
+
+    def get_calibration_frame(
+        self,
+    ) -> tuple[np.ndarray, float, tuple[tuple[int, int, int, int], ...]]:
+        """Copy one published frame and its frozen vehicle boxes under the same lock."""
+        with self.current_frame_lock:
+            frame = np.copy(self._current_frame)
+            frame_time = self.current_frame_time
+            vehicles = self._current_frame_vehicles
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420), frame_time, vehicles
 
     def get_current_frame(self, draw_options: dict[str, Any] = {}) -> np.ndarray:
         with self.current_frame_lock:
@@ -605,6 +616,22 @@ class CameraState:
             if current_frame is not None:
                 self.current_frame_time = frame_time
                 self._current_frame = np.copy(current_frame)
+                # Objects update outside this lock. Freeze plain coordinates when
+                # installing their exact image; later API reads never dereference
+                # mutable tracker objects to annotate an older frame.
+                self._current_frame_vehicles = tuple(
+                    (
+                        int(obj.obj_data["box"][0]),
+                        int(obj.obj_data["box"][1]),
+                        int(obj.obj_data["box"][2]),
+                        int(obj.obj_data["box"][3]),
+                    )
+                    for obj in tracked_objects.values()
+                    if obj.obj_data["frame_time"] == frame_time
+                    and obj.obj_data["label"] in {"car", "truck", "bus", "motorcycle"}
+                    and not obj.false_positive
+                    and obj.obj_data.get("end_time") is None
+                )
 
                 if self.previous_frame_id is not None:
                     self.frame_manager.close(self.previous_frame_id)

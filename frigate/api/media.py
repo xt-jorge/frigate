@@ -2,6 +2,7 @@
 
 import asyncio
 import glob
+import json
 import logging
 import math
 import os
@@ -149,6 +150,61 @@ async def camera_ptz_info(request: Request, camera_name: str):
             content={"success": False, "message": "Camera not found"},
             status_code=404,
         )
+
+
+@router.get(
+    "/{camera_name}/calibration.jpg", dependencies=[Depends(require_camera_access)]
+)
+async def calibration_frame(request: Request, camera_name: str):
+    """Return an unannotated detector frame with its exact vehicle boxes."""
+    state = request.app.detected_frames_processor.camera_states.get(camera_name)
+    if state is None or not state.camera_config.detect.enabled:
+        return JSONResponse(
+            content={"message": "Camera not available"}, status_code=404
+        )
+    frame, frame_time, vehicles = state.get_calibration_frame()
+    now = time.time()
+    if (
+        not math.isfinite(frame_time)
+        or frame_time <= 0
+        or not 0 <= now - frame_time <= 5
+    ):
+        return JSONResponse(
+            content={"message": "Current frame not available"}, status_code=503
+        )
+    # Bound header size and refuse truncation: omitted vehicles must never look
+    # like a complete empty-frame detection result.
+    if len(vehicles) > 32:
+        return JSONResponse(
+            content={"message": "Detection limit exceeded"}, status_code=503
+        )
+    height, width = frame.shape[:2]
+    if any(
+        not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height)
+        for x1, y1, x2, y2 in vehicles
+    ):
+        return JSONResponse(
+            content={"message": "Detection geometry unavailable"}, status_code=503
+        )
+    encoded, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    if not encoded:
+        return JSONResponse(content={"message": "Frame unavailable"}, status_code=503)
+    metadata = {
+        "state": "matched",
+        "capturedAtMs": math.floor(frame_time * 1000 + 0.5),
+        "width": width,
+        "height": height,
+        "vehicles": [{"box": box} for box in vehicles],
+    }
+    return Response(
+        jpg.tobytes(),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Frame-Time": str(frame_time),
+            "X-Calibration-Frame": json.dumps(metadata, separators=(",", ":")),
+        },
+    )
 
 
 @router.get(
