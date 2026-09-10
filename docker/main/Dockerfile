@@ -15,7 +15,9 @@ ARG BASE_HOOK=
 # Extra flags for pip/get-pip. Empty for every stock image; set to --ignore-installed only for
 # the JetPack 7 / Ubuntu 24.04 (noble) TensorRT base, whose distro pip/setuptools/wheel ship with
 # no RECORD file and would otherwise abort get-pip/`pip install -U` with "uninstall-no-record-file".
-ARG PIP_IGNORE_INSTALLED=
+# Deliberately NOT named PIP_*: build args are exported into every RUN's environment, and pip
+# parses any PIP_<option> variable as a boolean config value, rejecting a flag string outright.
+ARG EXTRA_PIP_INSTALL_FLAGS=
 
 FROM ${BASE_IMAGE} AS base
 ARG PIP_BREAK_SYSTEM_PACKAGES
@@ -162,7 +164,7 @@ FROM base AS wheels
 ARG DEBIAN_FRONTEND
 ARG TARGETARCH
 ARG DEBUG=false
-ARG PIP_IGNORE_INSTALLED
+ARG EXTRA_PIP_INSTALL_FLAGS
 
 # Use a separate container to build wheels to prevent build dependencies in final image
 RUN apt-get -qq update \
@@ -189,7 +191,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
-    && python3 get-pip.py ${PIP_IGNORE_INSTALLED} "pip"
+    && python3 get-pip.py ${EXTRA_PIP_INSTALL_FLAGS} "pip"
 
 COPY docker/main/requirements.txt /requirements.txt
 COPY docker/main/requirements-dev.txt /requirements-dev.txt
@@ -228,7 +230,7 @@ COPY docker/main/rootfs/ /
 FROM slim-base AS deps
 ARG TARGETARCH
 ARG BASE_IMAGE
-ARG PIP_IGNORE_INSTALLED
+ARG EXTRA_PIP_INSTALL_FLAGS
 
 ARG DEBIAN_FRONTEND
 # http://stackoverflow.com/questions/48162574/ddg#49462622
@@ -277,10 +279,10 @@ ENV INCLUDED_FFMPEG_VERSIONS="${DEFAULT_FFMPEG_VERSION}:7.0:5.0"
 
 RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
-    && python3 get-pip.py ${PIP_IGNORE_INSTALLED} "pip"
+    && python3 get-pip.py ${EXTRA_PIP_INSTALL_FLAGS} "pip"
 
 RUN --mount=type=bind,from=wheels,source=/wheels,target=/deps/wheels \
-    pip3 install -U ${PIP_IGNORE_INSTALLED} /deps/wheels/*.whl
+    pip3 install -U ${EXTRA_PIP_INSTALL_FLAGS} /deps/wheels/*.whl
 
 # Install Axera Engine
 RUN pip3 install https://github.com/AXERA-TECH/pyaxengine/releases/download/0.1.3-frigate/axengine-0.1.3-py3-none-any.whl

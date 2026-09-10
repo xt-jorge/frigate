@@ -31,8 +31,11 @@ variable "L4T_APT_RELEASE" {
 variable "JETSON_SOC_REPO" {
   default = ""
 }
-variable "PIP_IGNORE_INSTALLED" {
+variable "EXTRA_PIP_INSTALL_FLAGS" {
   default = ""
+}
+variable "BAKE_MODEL_CACHE" {
+  default = "0"
 }
 variable "BASE_HOOK" {
   # Ensure an up-to-date python 3.11 is available in jetson images
@@ -62,7 +65,8 @@ target "_build_args" {
     TENSORRT_PYTHON_BRANCH = TENSORRT_PYTHON_BRANCH,
     L4T_APT_RELEASE = L4T_APT_RELEASE,
     JETSON_SOC_REPO = JETSON_SOC_REPO,
-    PIP_IGNORE_INSTALLED = PIP_IGNORE_INSTALLED,
+    EXTRA_PIP_INSTALL_FLAGS = EXTRA_PIP_INSTALL_FLAGS,
+    BAKE_MODEL_CACHE = BAKE_MODEL_CACHE,
     BASE_HOOK = BASE_HOOK
   }
   platforms = ["linux/${ARCH}"]

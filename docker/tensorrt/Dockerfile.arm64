@@ -10,6 +10,7 @@ ARG ONNXRUNTIME_BRANCH=rel-1.25.1
 ARG TENSORRT_PYTHON_BRANCH=release/8.6
 ARG L4T_APT_RELEASE=
 ARG JETSON_SOC_REPO=
+ARG BAKE_MODEL_CACHE=0
 
 # Build TensorRT-specific library
 FROM ${TRT_BASE} AS trt-deps
@@ -163,6 +164,16 @@ RUN --mount=type=bind,source=docker/tensorrt/build_jetson_ffmpeg.sh,target=/deps
     --mount=type=cache,target=/root/.ccache \
     L4T_APT_RELEASE="${L4T_APT_RELEASE}" JETSON_SOC_REPO="${JETSON_SOC_REPO}" /deps/build_jetson_ffmpeg.sh
 
+# Model files Frigate would otherwise download on first use (license plate
+# recognition, face recognition, bird classification). Gated so only the JP7
+# release grows by the ~490 MB; docker/tensorrt/detector/rootfs ships the s6
+# oneshot that seeds them into /config/model_cache before Frigate starts.
+FROM wget AS model-cache
+ARG BAKE_MODEL_CACHE
+RUN --mount=type=bind,source=docker/tensorrt/bake_model_cache.sh,target=/deps/bake_model_cache.sh \
+    mkdir -p /rootfs/model_cache_seed \
+    && if [ "${BAKE_MODEL_CACHE}" = "1" ]; then sh /deps/bake_model_cache.sh /rootfs/model_cache_seed; fi
+
 # Frigate w/ TensorRT for NVIDIA Jetson platforms
 FROM tensorrt-base AS frigate-tensorrt
 RUN apt-get update \
@@ -172,6 +183,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=jetson-ffmpeg /rootfs /
+COPY --from=model-cache /rootfs/model_cache_seed /model_cache_seed
 ENV DEFAULT_FFMPEG_VERSION="jetson"
 ENV INCLUDED_FFMPEG_VERSIONS="${DEFAULT_FFMPEG_VERSION}:${INCLUDED_FFMPEG_VERSIONS}"
 
