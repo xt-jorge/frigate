@@ -5398,6 +5398,40 @@ paths:
         - frigateUserAuth: []
       x-required-role: camera
       description: '**Access:** Authenticated user with access to the referenced camera.'
+  /{camera_name}/calibration.jpg:
+    get:
+      tags:
+        - Media
+      summary: Calibration Frame
+      description: |-
+        **Access:** Authenticated user with access to the referenced camera.
+
+        Return an unannotated detector frame with its exact vehicle boxes.
+      operationId: calibration_frame__camera_name__calibration_jpg_get
+      parameters:
+        - name: camera_name
+          in: path
+          required: true
+          schema:
+            anyOf:
+              - type: string
+              - type: 'null'
+            title: Camera Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+        - frigateUserAuth: []
+      x-required-role: camera
   /{camera_name}/latest.{extension}:
     get:
       tags:
