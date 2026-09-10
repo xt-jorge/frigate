@@ -1,0 +1,38 @@
+#!/command/with-contenv bash
+# shellcheck shell=bash
+# Seed /config/model_cache from the model files baked into the image so Frigate
+# finds them instead of downloading on first use. The runtime presence test is a
+# bare os.path.exists (frigate/util/downloader.py), so a copy at the exact
+# relative path is sufficient. Existing files are never overwritten: whatever an
+# operator placed, or an earlier start copied, wins.
+
+set -o errexit -o nounset -o pipefail
+
+SEED_DIR="/model_cache_seed"
+MODEL_CACHE_DIR="/config/model_cache"
+
+if [[ ! -d "${SEED_DIR}" ]] || [[ -z "$(ls -A "${SEED_DIR}")" ]]; then
+    echo "[INFO] No baked model cache in this image; nothing to seed" >&2
+    exit 0
+fi
+
+mkdir -p "${MODEL_CACHE_DIR}"
+
+seeded=0
+skipped=0
+while IFS= read -r -d '' src; do
+    rel="${src#"${SEED_DIR}"/}"
+    dst="${MODEL_CACHE_DIR}/${rel}"
+    if [[ -e "${dst}" ]]; then
+        skipped=$((skipped + 1))
+        continue
+    fi
+    mkdir -p "$(dirname "${dst}")"
+    # Same .part-then-rename discipline as the downloader: a start interrupted
+    # mid-copy must not leave a truncated file that passes the exists check.
+    cp -p "${src}" "${dst}.part"
+    mv "${dst}.part" "${dst}"
+    seeded=$((seeded + 1))
+done < <(find "${SEED_DIR}" -type f ! -name SHA256SUMS -print0)
+
+echo "[INFO] Model cache seed: ${seeded} file(s) copied into ${MODEL_CACHE_DIR}, ${skipped} already present" >&2
