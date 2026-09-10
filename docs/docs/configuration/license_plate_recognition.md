@@ -26,6 +26,8 @@ When a plate is recognized, the details are:
 - Published via the `frigate/events` MQTT topic as a `sub_label` ([known](#matching)) or `recognized_license_plate` (unknown) for the `car` or `motorcycle` tracked object.
 - Published via the `frigate/tracked_object_update` MQTT topic with `name` (if [known](#matching)) and `plate`.
 
+Changes to a tracked object's recognized plate or its score, including clearing the plate, trigger a `frigate/events` update on the next processed frame. This also applies while the vehicle is stationary. Repeating the same plate and score does not trigger an additional update.
+
 ## Model Requirements
 
 Users running a Frigate+ model (or any custom model that natively detects license plates) should ensure that `license_plate` is added to the [list of objects to track](https://docs.frigate.video/plus/#available-label-types) either globally or for a specific camera. This will improve the accuracy and performance of the LPR model.
