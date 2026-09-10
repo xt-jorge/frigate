@@ -338,6 +338,12 @@ class TrackedObject:
             if curr_labels - prev_labels:
                 significant_change = True
 
+            # OCR metadata arrives between frames; compare with the last event.
+            if self.obj_data.get("recognized_license_plate") != self.previous.get(
+                "recognized_license_plate"
+            ):
+                significant_change = True
+
             # if the state changed between stationary and active
             if self.previous["active"] != self.active:
                 significant_change = True
