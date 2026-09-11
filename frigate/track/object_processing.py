@@ -480,6 +480,7 @@ class TrackedObjectProcessor(threading.Thread):
         if not tracked_obj and not event:
             return
 
+        event_data: Any = event.data if event is not None else None
         if source_frame_time is not None:
             if (
                 field_name != "recognized_license_plate"
@@ -507,7 +508,7 @@ class TrackedObjectProcessor(threading.Thread):
                 or cast(float | None, event.end_time) is not None
                 or source_frame_time < event.start_time
                 or source_frame_time
-                <= (event.data.get("recognized_license_plate_frame_time") or 0)
+                <= (event_data.get("recognized_license_plate_frame_time") or 0)
             ):
                 return
 
@@ -522,15 +523,14 @@ class TrackedObjectProcessor(threading.Thread):
             )
 
         if event:
-            data = cast(dict[str, Any], event.data)
-            data[field_name] = field_value
+            event_data[field_name] = field_value
             if field_name == "recognized_license_plate":
-                data["recognized_license_plate_frame_time"] = source_frame_time
+                event_data["recognized_license_plate_frame_time"] = source_frame_time
             if field_value is None:
-                data[f"{field_name}_score"] = None
+                event_data[f"{field_name}_score"] = None
             elif score is not None:
-                data[f"{field_name}_score"] = score
-            event.data = data
+                event_data[f"{field_name}_score"] = score
+            event.data = event_data
             event.save()
 
     def save_lpr_snapshot(self, payload: tuple) -> None:
