@@ -32,7 +32,7 @@ Changes to a tracked object's recognized plate, score, or original OCR capture t
 
 ### Current-frame sampling
 
-OCR consumes current detector packets independently of saved events and the best-thumbnail publication cadence. Only active true-positive tracks with a crop belonging to that exact detector frame are eligible. Existing initialization, motion, stationary-duration, plate-area, model, and recognition thresholds still apply.
+OCR consumes current detector packets independently of saved events and the best-thumbnail publication cadence. Only ongoing true-positive tracks with a crop belonging to that exact detector frame are eligible. Existing initialization, motion, stationary-duration, plate-area, model, and recognition thresholds still apply.
 
 There is one synchronous OCR call at a time. Scheduling starts with the first eligible sample and uses the least recently served camera and track. It permits at most one attempt every 250 milliseconds globally and every 500 milliseconds per camera. These are compute ceilings, not promised recognition rates; slower inference reduces throughput. Each loop drains at most 32 video packets and keeps only the latest packet per camera, without a queue of copied images. Missing, overwritten, future-dated, or more-than-five-second-old frames are discarded. The shared capture buffer is copied before inference only if its original timestamp still matches the packet.
 
