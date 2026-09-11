@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -6,6 +6,14 @@ DEFAULT_TIME_RANGE = "00:00,24:00"
 
 
 class EventsQueryParams(BaseModel):
+    view: Literal["full", "track"] = Field(
+        "full",
+        description=(
+            "Response projection. The track view returns only id, camera, label, "
+            "and end_time, without event data or thumbnails. "
+            "All filters, sorting, and limits apply to both views."
+        ),
+    )
     camera: Optional[str] = "all"
     cameras: Optional[str] = "all"
     label: Optional[str] = "all"

@@ -3,6 +3,15 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict
 
 
+class EventTrackResponse(BaseModel):
+    """Event identity and end state without history or media."""
+
+    id: str
+    camera: str
+    label: str
+    end_time: float | None
+
+
 class EventResponse(BaseModel):
     id: str
     label: str
