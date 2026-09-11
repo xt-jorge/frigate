@@ -3,8 +3,8 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict
 
 
-class EventTrackResponse(BaseModel):
-    """Event identity and end state without history or media."""
+class LiveTrackResponse(BaseModel):
+    """Frozen live tracker identity and end state."""
 
     id: str
     camera: str

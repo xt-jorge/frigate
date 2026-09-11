@@ -2,7 +2,6 @@ from datetime import datetime
 from typing import Any
 from unittest.mock import Mock
 
-from fastapi.testclient import TestClient
 from playhouse.shortcuts import model_to_dict
 
 from frigate.api.auth import get_allowed_cameras_for_filter, get_current_user
@@ -51,7 +50,7 @@ class TestHttpApp(BaseTestHttp):
             events = client.get("/events").json()
             assert len(events) == 0
 
-    def test_get_event_track_view_excludes_large_history_and_thumbnail(self):
+    def test_get_event_list_preserves_full_history_and_thumbnail(self):
         event_id = "123456.long-lived"
         path_data = [[[0.25, 0.75], timestamp] for timestamp in range(10000)]
         with AuthTestClient(self.app) as client:
@@ -59,110 +58,11 @@ class TestHttpApp(BaseTestHttp):
             Event.update(label="person", end_time=None, thumbnail="thumbnail").where(
                 Event.id == event_id
             ).execute()
-
-            full_response = client.get("/events")
-            assert full_response.status_code == 200
-            assert len(full_response.content) > 64 * 1024
-            assert full_response.json()[0]["data"]["path_data"] == path_data
-            assert full_response.json()[0]["thumbnail"] == "thumbnail"
-            assert client.get("/events", params={"view": "full"}).json() == (
-                full_response.json()
-            )
-
-            for thumbnail_params in (
-                {},
-                {"include_thumbnails": 0},
-                {"include_thumbnails": 1},
-            ):
-                with self.subTest(thumbnail_params=thumbnail_params):
-                    response = client.get(
-                        "/events", params={"view": "track", **thumbnail_params}
-                    )
-                    assert response.status_code == 200
-                    assert response.json() == [
-                        {
-                            "id": event_id,
-                            "camera": "front_door",
-                            "label": "person",
-                            "end_time": None,
-                        }
-                    ]
-                    assert len(response.content) < 64 * 1024
-
-    def test_get_event_track_view_preserves_filters_sort_and_limit(self):
-        fixtures = [
-            ("active", "front_door", "person", 100, None, 0.8),
-            ("newer", "front_door", "person", 110, None, 0.6),
-            ("ended", "front_door", "person", 90, 120, 0.9),
-            ("other-label", "front_door", "car", 120, None, 0.7),
-            ("other-camera", "back_door", "person", 130, None, 1.0),
-        ]
-        with AuthTestClient(self.app) as client:
-            for event_id, camera, label, start, end, score in fixtures:
-                super().insert_mock_event(
-                    event_id, camera=camera, start_time=start, data={"score": score}
-                )
-                Event.update(label=label, end_time=end).where(
-                    Event.id == event_id
-                ).execute()
-
-            cases = [
-                ({}, ["other-label", "newer", "active", "ended"]),
-                ({"labels": "person", "in_progress": 1}, ["newer", "active"]),
-                ({"labels": "person", "in_progress": 0}, ["ended"]),
-                ({"labels": "person", "limit": 1}, ["newer"]),
-                (
-                    {"labels": "person", "sort": "score_desc"},
-                    ["ended", "active", "newer"],
-                ),
-                ({"labels": "person", "min_score": 0.7}, ["active", "ended"]),
-                ({"after": 95, "before": 105}, ["active"]),
-                (
-                    {"cameras": "front_door,back_door", "labels": "person"},
-                    ["newer", "active", "ended"],
-                ),
-                ({"cameras": "back_door"}, []),
-                ({"camera": "back_door"}, []),
-                ({"event_id": "other-camera"}, []),
-                ({"event_id": "ended", "labels": "person"}, ["ended"]),
-                ({"event_id": "missing"}, []),
-            ]
-            for params, expected_ids in cases:
-                with self.subTest(params=params):
-                    response = client.get("/events", params={"view": "track", **params})
-                    assert response.status_code == 200
-                    events = response.json()
-                    assert [event["id"] for event in events] == expected_ids
-                    assert events == [
-                        {
-                            key: event[key]
-                            for key in ("id", "camera", "label", "end_time")
-                        }
-                        for event in client.get("/events", params=params).json()
-                    ]
-                    for event in events:
-                        assert event["end_time"] == (
-                            120 if event["id"] == "ended" else None
-                        )
-
-    def test_get_event_track_view_requires_authentication(self):
-        with TestClient(self.app) as client:
-            for view in ("full", "track"):
-                with self.subTest(view=view):
-                    response = client.get("/events", params={"view": view})
-                    assert response.status_code == 401
-        with AuthTestClient(self.app) as client:
-            response = client.get(
-                "/events",
-                params={"view": "track"},
-                headers={"remote-user": "viewer", "remote-role": "viewer"},
-            )
+            response = client.get("/events")
             assert response.status_code == 200
-
-    def test_get_event_list_rejects_unknown_view(self):
-        with AuthTestClient(self.app) as client:
-            response = client.get("/events", params={"view": "unknown"})
-            assert response.status_code == 422
+            assert len(response.content) > 64 * 1024
+            assert response.json()[0]["data"]["path_data"] == path_data
+            assert response.json()[0]["thumbnail"] == "thumbnail"
 
     def test_get_event_list_no_match_event_id(self):
         id = "123456.random"

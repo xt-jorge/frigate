@@ -5,12 +5,14 @@ import base64
 import datetime
 import json
 import logging
+import math
 import os
 import random
 import string
+import time
 from functools import reduce
 from pathlib import Path
-from typing import List
+from typing import Annotated, List
 from urllib.parse import unquote
 
 import numpy as np
@@ -32,6 +34,7 @@ from frigate.api.defs.query.events_query_parameters import (
     EventsQueryParams,
     EventsSearchQueryParams,
     EventsSummaryQueryParams,
+    LiveTracksQueryParams,
 )
 from frigate.api.defs.query.regenerate_query_parameters import (
     RegenerateQueryParameters,
@@ -51,8 +54,8 @@ from frigate.api.defs.response.event_response import (
     EventCreateResponse,
     EventMultiDeleteResponse,
     EventResponse,
-    EventTrackResponse,
     EventUploadPlusResponse,
+    LiveTrackResponse,
 )
 from frigate.api.defs.response.generic_response import GenericResponse
 from frigate.api.defs.tags import Tags
@@ -90,17 +93,94 @@ def _build_attribute_filter_clause(attributes: str):
 
 
 @router.get(
+    "/tracks",
+    response_model=list[LiveTrackResponse],
+    dependencies=[Depends(allow_any_authenticated())],
+    summary="Get live tracks",
+    description=(
+        "Returns compact true-positive tracker metadata from detector frames, "
+        "including stationary objects, without reading persisted events. Explicit "
+        "comma-separated cameras are required and filtered by camera access. "
+        "Listing returns at most limit discovery hints: unavailable or stale "
+        "cameras are omitted, and omission never proves a track ended. An exact "
+        "event_id lookup requires one camera and returns 503 if its current frame "
+        "is unavailable, older than five seconds, or in the future. A fresh "
+        "snapshot without that track returns an empty list (unknown). Only a "
+        "non-null end_time reports the tracker's explicit end; no event-history "
+        "fallback is used. Responses are private and not cached."
+    ),
+)
+def live_tracks(
+    request: Request,
+    params: Annotated[LiveTracksQueryParams, Depends()],
+    allowed_cameras: Annotated[list[str], Depends(get_allowed_cameras_for_filter)],
+):
+    """Return bounded, frame-published lifetime hints from authorized cameras."""
+    headers = {"Cache-Control": "private, no-store"}
+    cameras = set(params.cameras.split(","))
+    labels = set(params.labels.split(","))
+    if (
+        "" in cameras
+        or "all" in cameras
+        or "" in labels
+        or (params.event_id and len(cameras) != 1)
+    ):
+        return JSONResponse(
+            content={"message": "Invalid track filter"},
+            status_code=422,
+            headers=headers,
+        )
+
+    results = []
+    processor = request.app.detected_frames_processor
+    states = processor.camera_states if processor is not None else {}
+    for camera in sorted(cameras.intersection(allowed_cameras)):
+        state = states.get(camera)
+        snapshot = (
+            state.get_live_tracks()
+            if state is not None
+            and state.camera_config.enabled
+            and state.camera_config.detect.enabled
+            else None
+        )
+        now = time.time()
+        if snapshot is None or (
+            not math.isfinite(snapshot[0])
+            or snapshot[0] <= 0
+            or not 0 <= now - snapshot[0] <= 5
+        ):
+            if params.event_id:
+                return JSONResponse(
+                    content={"message": "Current track metadata not available"},
+                    status_code=503,
+                    headers=headers,
+                )
+            continue
+
+        for track_id, label, end_time in sorted(snapshot[1]):
+            if params.event_id is not None and track_id != params.event_id:
+                continue
+            if params.labels != "all" and label not in labels:
+                continue
+            if params.in_progress is not None and (end_time is None) != bool(
+                params.in_progress
+            ):
+                continue
+            results.append(
+                {"id": track_id, "camera": camera, "label": label, "end_time": end_time}
+            )
+            if len(results) == params.limit:
+                return JSONResponse(content=results, headers=headers)
+
+    return JSONResponse(content=results, headers=headers)
+
+
+@router.get(
     "/events",
-    response_model=list[EventResponse] | list[EventTrackResponse],
+    response_model=list[EventResponse],
     dependencies=[Depends(allow_any_authenticated())],
     summary="Get events",
-    description=(
-        "Returns a list of events. Use view=track for only id, camera, label, and "
-        "end_time; null end_time indicates an event is still in progress. "
-        "Track view omits event data and thumbnails regardless of include_thumbnails. "
-        "All filters, sorting, and limits apply to both views. "
-        "The default full view includes event data."
-    ),
+    description="Returns a list of events.",
 )
 def events(
     params: EventsQueryParams = Depends(),
@@ -176,8 +256,6 @@ def events(
         Event.box,
         Event.data,
     ]
-    if params.view == "track":
-        selected_columns = [Event.id, Event.camera, Event.label, Event.end_time]
 
     if camera != "all":
         clauses.append((Event.camera == camera))
@@ -319,7 +397,7 @@ def events(
     if in_progress is not None:
         clauses.append((Event.end_time.is_null(in_progress)))
 
-    if include_thumbnails and params.view == "full":
+    if include_thumbnails:
         selected_columns.append(Event.thumbnail)
 
     if favorites:
