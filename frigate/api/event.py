@@ -51,6 +51,7 @@ from frigate.api.defs.response.event_response import (
     EventCreateResponse,
     EventMultiDeleteResponse,
     EventResponse,
+    EventTrackResponse,
     EventUploadPlusResponse,
 )
 from frigate.api.defs.response.generic_response import GenericResponse
@@ -90,10 +91,16 @@ def _build_attribute_filter_clause(attributes: str):
 
 @router.get(
     "/events",
-    response_model=list[EventResponse],
+    response_model=list[EventResponse] | list[EventTrackResponse],
     dependencies=[Depends(allow_any_authenticated())],
     summary="Get events",
-    description="Returns a list of events.",
+    description=(
+        "Returns a list of events. Use view=track for only id, camera, label, and "
+        "end_time; null end_time indicates an event is still in progress. "
+        "Track view omits event data and thumbnails regardless of include_thumbnails. "
+        "All filters, sorting, and limits apply to both views. "
+        "The default full view includes event data."
+    ),
 )
 def events(
     params: EventsQueryParams = Depends(),
@@ -169,6 +176,8 @@ def events(
         Event.box,
         Event.data,
     ]
+    if params.view == "track":
+        selected_columns = [Event.id, Event.camera, Event.label, Event.end_time]
 
     if camera != "all":
         clauses.append((Event.camera == camera))
@@ -310,7 +319,7 @@ def events(
     if in_progress is not None:
         clauses.append((Event.end_time.is_null(in_progress)))
 
-    if include_thumbnails:
+    if include_thumbnails and params.view == "full":
         selected_columns.append(Event.thumbnail)
 
     if favorites:

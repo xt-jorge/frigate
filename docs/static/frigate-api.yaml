@@ -3906,9 +3906,19 @@ paths:
       description: |-
         **Access:** Any authenticated user.
 
-        Returns a list of events.
+        Returns a list of events. Use view=track for only id, camera, label, and end_time; null end_time indicates an event is still in progress. Track view omits event data and thumbnails regardless of include_thumbnails. All filters, sorting, and limits apply to both views. The default full view includes event data.
       operationId: events_events_get
       parameters:
+        - name: view
+          in: query
+          required: false
+          schema:
+            enum:
+              - full
+              - track
+            type: string
+            default: full
+            title: View
         - name: camera
           in: query
           required: false
@@ -4161,9 +4171,13 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/EventResponse'
+                anyOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/EventResponse'
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/EventTrackResponse'
                 title: Response Events Events Get
         '422':
           description: Validation Error
@@ -7767,6 +7781,30 @@ components:
         - model_type
         - data
       title: EventResponse
+    EventTrackResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        camera:
+          type: string
+          title: Camera
+        label:
+          type: string
+          title: Label
+        end_time:
+          anyOf:
+            - type: number
+            - type: 'null'
+          title: End Time
+      type: object
+      required:
+        - id
+        - camera
+        - label
+        - end_time
+      title: EventTrackResponse
+      description: Event identity and end state without history or media.
     EventUploadPlusResponse:
       properties:
         success:
