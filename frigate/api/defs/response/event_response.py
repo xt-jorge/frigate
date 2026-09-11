@@ -9,7 +9,7 @@ class EventTrackResponse(BaseModel):
     id: str
     camera: str
     label: str
-    end_time: Optional[float]
+    end_time: float | None
 
 
 class EventResponse(BaseModel):
