@@ -49,6 +49,9 @@ class CameraState:
         self.current_frame_lock = threading.Lock()
         self.current_frame_time = 0.0
         self._current_frame_vehicles: tuple[tuple[int, int, int, int], ...] = ()
+        self._current_frame_tracks: tuple[tuple[str, str, float | None], ...] | None = (
+            None
+        )
         self.motion_boxes: list[tuple[int, int, int, int]] = []
         self.regions: list[tuple[int, int, int, int]] = []
         self.previous_frame_id: str | None = None
@@ -77,6 +80,15 @@ class CameraState:
         ):
             # A plate is a smaller fraction of a vehicle box; use ~20x multiplier
             self.lpr_min_obj_area = self.camera_config.lpr.min_area * 20
+
+    def get_live_tracks(
+        self,
+    ) -> tuple[float, tuple[tuple[str, str, float | None], ...]] | None:
+        """Read scalar tracker lifetimes frozen with the published detector frame."""
+        with self.current_frame_lock:
+            if self._current_frame_tracks is None:
+                return None
+            return self.current_frame_time, self._current_frame_tracks
 
     def get_calibration_frame(
         self,
@@ -333,6 +345,7 @@ class CameraState:
             )
             with self.current_frame_lock:
                 self.tracked_objects.clear()
+                self._current_frame_tracks = None
                 self.motion_boxes = []
                 self.regions = []
             self._last_frame_shape = current_shape
@@ -612,10 +625,24 @@ class CameraState:
             self.tracked_objects = tracked_objects
             self.motion_boxes = motion_boxes
             self.regions = regions
+            self._current_frame_tracks = None
 
             if current_frame is not None:
                 self.current_frame_time = frame_time
                 self._current_frame = np.copy(current_frame)
+                # Freeze identities after callbacks have run. Readers must not
+                # observe the next in-place tracker mutation against this frame.
+                # Stationary true positives remain live until an explicit end;
+                # motion activity and persisted Event rows do not own lifetime.
+                self._current_frame_tracks = tuple(
+                    (
+                        obj.obj_data["id"],
+                        obj.obj_data["label"],
+                        obj.obj_data.get("end_time"),
+                    )
+                    for obj in tracked_objects.values()
+                    if not obj.false_positive
+                )
                 # Objects update outside this lock. Freeze plain coordinates when
                 # installing their exact image; later API reads never dereference
                 # mutable tracker objects to annotate an older frame.

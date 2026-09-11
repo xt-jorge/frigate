@@ -94,6 +94,7 @@ def require_admin_by_default():
         "/go2rtc/streams",
         "/event_ids",
         "/events",
+        "/tracks",
         "/cases",
         "/exports",
         "/jobs/export",

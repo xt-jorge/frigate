@@ -1,19 +1,19 @@
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
 DEFAULT_TIME_RANGE = "00:00,24:00"
 
 
+class LiveTracksQueryParams(BaseModel):
+    cameras: str = Field(min_length=1, max_length=4096)
+    labels: str = Field("all", min_length=1, max_length=1024)
+    event_id: str | None = Field(None, min_length=1, max_length=256)
+    in_progress: int | None = Field(None, ge=0, le=1)
+    limit: int = Field(100, ge=1, le=257)
+
+
 class EventsQueryParams(BaseModel):
-    view: Literal["full", "track"] = Field(
-        "full",
-        description=(
-            "Response projection. The track view returns only id, camera, label, "
-            "and end_time, without event data or thumbnails. "
-            "All filters, sorting, and limits apply to both views."
-        ),
-    )
     camera: Optional[str] = "all"
     cameras: Optional[str] = "all"
     label: Optional[str] = "all"
