@@ -10,7 +10,7 @@ import subprocess as sp
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import unquote
 
 import cv2
@@ -172,11 +172,101 @@ async def calibration_frame(request: Request, camera_name: str):
         return JSONResponse(
             content={"message": "Current frame not available"}, status_code=503
         )
+    return _detector_frame_response(frame, frame_time, vehicles)
+
+
+@router.get(
+    "/{camera_name}/tracks/{track_id}/frame.jpg",
+    dependencies=[Depends(require_camera_access)],
+    summary="Get an atomic live track frame",
+    description=(
+        "Returns a full, unannotated detector frame and its frozen track identity "
+        "in X-Frigate-Track, with matching X-Frame-Time and X-Calibration-Frame. "
+        "Only true-positive person, car, truck, bus and motorcycle tracks qualify. "
+        "An explicit end returns 410; a fresh missing track returns 404 (unknown). "
+        "Unavailable, stale or future frames return 503. No event-history fallback."
+    ),
+)
+async def track_frame(
+    request: Request,
+    camera_name: str,
+    track_id: Annotated[str, Path(min_length=1, max_length=256)],
+):
+    """Bind current full-frame pixels to one camera-scoped frozen track."""
+    headers = {"Cache-Control": "private, no-store"}
+    processor = request.app.detected_frames_processor
+    state = processor.camera_states.get(camera_name) if processor is not None else None
+    snapshot = (
+        state.get_track_frame(track_id)
+        if state is not None
+        and state.camera_config.enabled
+        and state.camera_config.detect.enabled
+        else None
+    )
+    if snapshot is None or (
+        not math.isfinite(snapshot[1])
+        or snapshot[1] <= 0
+        or not 0 <= time.time() - snapshot[1] <= 5
+    ):
+        return JSONResponse(
+            content={"message": "Current frame not available"},
+            status_code=503,
+            headers=headers,
+        )
+    frame, frame_time, track, vehicles = snapshot
+    if track is None or track[1] not in {"person", "car", "truck", "bus", "motorcycle"}:
+        return JSONResponse(
+            content={"message": "Track not present in current frame"},
+            status_code=404,
+            headers=headers,
+        )
+    identity = {
+        "id": track[0],
+        "camera": camera_name,
+        "label": track[1],
+        "end_time": track[2],
+    }
+    encoded_identity = json.dumps(identity, separators=(",", ":"))
+    if len(encoded_identity) > 1024 or (
+        track[2] is not None
+        and (not math.isfinite(track[2]) or not 0 < track[2] <= frame_time)
+    ):
+        return JSONResponse(
+            content={"message": "Track metadata unavailable"},
+            status_code=503,
+            headers=headers,
+        )
+    headers.update(
+        {"X-Frigate-Track": encoded_identity, "X-Frame-Time": str(frame_time)}
+    )
+    if track[2] is not None:
+        return JSONResponse(
+            content={"message": "Track ended"}, status_code=410, headers=headers
+        )
+    if frame is None:
+        return JSONResponse(
+            content={"message": "Current frame not available"},
+            status_code=503,
+            headers=headers,
+        )
+    return _detector_frame_response(frame, frame_time, vehicles, headers)
+
+
+def _detector_frame_response(
+    frame: np.ndarray,
+    frame_time: float,
+    vehicles: tuple[tuple[int, int, int, int], ...],
+    headers: dict[str, str] | None = None,
+):
+    """Encode copied detector pixels and their matching frozen geometry."""
+    headers = {"Cache-Control": "private, no-store", **(headers or {})}
     # Bound header size and refuse truncation: omitted vehicles must never look
     # like a complete empty-frame detection result.
     if len(vehicles) > 32:
         return JSONResponse(
-            content={"message": "Detection limit exceeded"}, status_code=503
+            content={"message": "Detection limit exceeded"},
+            status_code=503,
+            headers=headers,
         )
     height, width = frame.shape[:2]
     if any(
@@ -184,11 +274,15 @@ async def calibration_frame(request: Request, camera_name: str):
         for x1, y1, x2, y2 in vehicles
     ):
         return JSONResponse(
-            content={"message": "Detection geometry unavailable"}, status_code=503
+            content={"message": "Detection geometry unavailable"},
+            status_code=503,
+            headers=headers,
         )
     encoded, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     if not encoded:
-        return JSONResponse(content={"message": "Frame unavailable"}, status_code=503)
+        return JSONResponse(
+            content={"message": "Frame unavailable"}, status_code=503, headers=headers
+        )
     metadata = {
         "state": "matched",
         "capturedAtMs": math.floor(frame_time * 1000 + 0.5),
@@ -200,7 +294,7 @@ async def calibration_frame(request: Request, camera_name: str):
         jpg.tobytes(),
         media_type="image/jpeg",
         headers={
-            "Cache-Control": "private, no-store",
+            **headers,
             "X-Frame-Time": str(frame_time),
             "X-Calibration-Frame": json.dumps(metadata, separators=(",", ":")),
         },

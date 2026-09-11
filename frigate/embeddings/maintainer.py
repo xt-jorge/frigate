@@ -4,7 +4,9 @@ import base64
 import datetime
 import json
 import logging
+import math
 import threading
+import time
 from multiprocessing.synchronize import Event as MpEvent
 from typing import Any
 
@@ -159,6 +161,11 @@ class EmbeddingMaintainer(threading.Thread):
         self.frame_manager = SharedMemoryFrameManager()
 
         self.detected_license_plates: dict[str, dict[str, Any]] = {}
+        # Metadata only: one current packet per camera, never a pixel backlog.
+        self._latest_lpr_frames: dict[str, tuple] = {}
+        self._lpr_camera_attempt: dict[str, float] = {}
+        self._lpr_track_attempt: dict[tuple[str, str], float] = {}
+        self._last_lpr_attempt = -math.inf
 
         # model runners to share between realtime and post processors
         if self.config.lpr.enabled:
@@ -491,6 +498,10 @@ class EmbeddingMaintainer(threading.Thread):
             f"Processing {len(self.realtime_processors)} realtime processors for object {data.get('id')} (label: {data.get('label')})"
         )
         for processor in self.realtime_processors:
+            # OCR uses current detector packets below, independently of the
+            # best-thumbnail/event publication cadence.
+            if isinstance(processor, LicensePlateRealTimeProcessor):
+                continue
             logger.debug(f"Calling process_frame on {processor.__class__.__name__}")
             processor.process_frame(data, yuv_frame)
 
@@ -604,7 +615,7 @@ class EmbeddingMaintainer(threading.Thread):
 
     def _expire_dedicated_lpr(self) -> None:
         """Remove plates not seen for longer than expiration timeout for dedicated lpr cameras."""
-        now = datetime.datetime.now().timestamp()
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
 
         to_remove = []
 
@@ -682,57 +693,189 @@ class EmbeddingMaintainer(threading.Thread):
                     )
 
     def _process_frame_updates(self) -> None:
-        """Process event updates"""
-        (topic, data) = self.detection_subscriber.check_for_update()
+        """Keep latest packets; bound draining so a busy feed cannot starve work."""
+        latest: dict[str, tuple] = {}
+        for _ in range(32):
+            topic, data = self.detection_subscriber.check_for_update(timeout=0)
+            if topic is None:
+                break
+            camera, frame_name, frame_time, objects, motion_boxes, regions = data
+            if camera not in self.config.cameras:
+                continue
+            latest[camera] = (
+                camera,
+                frame_name,
+                frame_time,
+                objects,
+                motion_boxes,
+                regions,
+            )
 
-        if topic is None:
+        for camera, packet in latest.items():
+            self._latest_lpr_frames[camera] = packet
+            active_ids = {
+                obj["id"]
+                for obj in packet[3]
+                if obj.get("end_time") is None and obj.get("false_positive") is False
+            }
+            self._lpr_track_attempt = {
+                key: value
+                for key, value in self._lpr_track_attempt.items()
+                if key[0] != camera or key[1] in active_ids
+            }
+
+        self._process_current_lpr()
+
+        # State classifiers retain their existing full-frame input and do not
+        # cause an additional OCR invocation.
+        for camera, packet in latest.items():
+            camera_config = self.config.cameras[camera]
+            classifiers = [
+                processor
+                for processor in self.realtime_processors
+                if isinstance(processor, CustomStateClassificationProcessor)
+            ]
+            if not classifiers or not camera_config.enabled:
+                continue
+            frame = self.frame_manager.get_captured_frame(
+                packet[1], camera_config.frame_shape_yuv, packet[2]
+            )
+            if frame is None:
+                continue
+            for processor in classifiers:
+                processor.process_frame({"camera": camera, "motion": packet[4]}, frame)
+            self.frame_manager.close(packet[1])
+
+    def _process_current_lpr(self) -> None:
+        """Run at most one current OCR sample, fairly across cameras and tracks."""
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        monotonic_now = time.monotonic()
+        self._latest_lpr_frames = {
+            camera: packet
+            for camera, packet in self._latest_lpr_frames.items()
+            if camera in self.config.cameras
+            and isinstance(packet[2], (float, int))
+            and not isinstance(packet[2], bool)
+            and math.isfinite(packet[2])
+            and 0 <= now - packet[2] <= 5
+        }
+        if monotonic_now - self._last_lpr_attempt < 0.250:
             return
-
-        camera, frame_name, _, _, motion_boxes, _ = data
-
-        if not camera or camera not in self.config.cameras:
-            return
-
-        camera_config = self.config.cameras.get(camera)
-        if camera_config is None:
-            return
-
-        dedicated_lpr_enabled = (
-            camera_config.type == CameraTypeEnum.lpr
-            and "license_plate" not in camera_config.objects.track
+        processor = next(
+            (
+                p
+                for p in self.realtime_processors
+                if isinstance(p, LicensePlateRealTimeProcessor)
+            ),
+            None,
         )
-
-        if not dedicated_lpr_enabled and len(self.config.classification.custom) == 0:
-            # no active features that use this data
+        if processor is None:
             return
 
-        try:
-            yuv_frame = self.frame_manager.get(
-                frame_name, camera_config.frame_shape_yuv
+        for camera in sorted(
+            self._latest_lpr_frames,
+            key=lambda name: (self._lpr_camera_attempt.get(name, -math.inf), name),
+        ):
+            camera_config = self.config.cameras[camera]
+            dedicated = (
+                camera_config.type == CameraTypeEnum.lpr
+                and "license_plate" not in camera_config.objects.track
             )
-        except FileNotFoundError:
-            pass
-
-        if yuv_frame is None:
-            logger.debug(
-                "Unable to process dedicated LPR update because frame is unavailable."
-            )
-            return
-
-        for processor in self.realtime_processors:
             if (
-                dedicated_lpr_enabled
-                and len(motion_boxes) > 0
-                and isinstance(processor, LicensePlateRealTimeProcessor)
+                not camera_config.enabled
+                or (not camera_config.detect.enabled and not dedicated)
+                or not camera_config.lpr.enabled
+                or monotonic_now - self._lpr_camera_attempt.get(camera, -math.inf)
+                < 0.500
             ):
-                processor.process_frame(camera, yuv_frame, True)
-
-            if isinstance(processor, CustomStateClassificationProcessor):
-                processor.process_frame(
-                    {"camera": camera, "motion": motion_boxes}, yuv_frame
+                continue
+            _, frame_name, frame_time, objects, motion_boxes, _ = (
+                self._latest_lpr_frames[camera]
+            )
+            candidate = None
+            if dedicated:
+                if not motion_boxes:
+                    continue
+            else:
+                candidates = [
+                    obj
+                    for obj in objects
+                    if self._current_lpr_object(obj, camera, frame_time, processor)
+                ]
+                if not candidates:
+                    continue
+                candidate = min(
+                    candidates,
+                    key=lambda obj: (
+                        self._lpr_track_attempt.get((camera, obj["id"]), -math.inf),
+                        obj["id"],
+                    ),
                 )
+            # This copy verifies that the circular buffer still contains the
+            # packet's exact capture. Missing/overwritten frames are discarded.
+            frame = self.frame_manager.get_captured_frame(
+                frame_name, camera_config.frame_shape_yuv, frame_time
+            )
+            self._latest_lpr_frames.pop(camera)
+            if frame is None:
+                continue
+            self.frame_manager.close(frame_name)
+            self._last_lpr_attempt = monotonic_now
+            self._lpr_camera_attempt[camera] = monotonic_now
+            if candidate is not None:
+                self._lpr_track_attempt[(camera, candidate["id"])] = monotonic_now
+            sample = {"camera": camera} if dedicated else candidate
+            if sample is None:
+                return
+            processor.process_frame(
+                sample,
+                frame,
+                dedicated,
+                source_frame_time=frame_time,
+            )
+            return
 
-        self.frame_manager.close(frame_name)
+    def _current_lpr_object(
+        self,
+        obj: dict[str, Any],
+        camera: str,
+        frame_time: float,
+        processor: LicensePlateRealTimeProcessor,
+    ) -> bool:
+        """Only a current true-positive track may supply the OCR crop."""
+        camera_config = self.config.cameras[camera]
+        if (
+            not isinstance(obj.get("id"), str)
+            or obj.get("camera") != camera
+            or obj.get("false_positive") is not False
+            or obj.get("end_time") is not None
+            or obj.get("frame_time") != frame_time
+            or obj.get("label") not in (*processor.lp_objects, "license_plate")
+            or (
+                obj.get("position_changes", 0) == 0 and not obj.get("stationary", False)
+            )
+        ):
+            return False
+        if obj.get("stationary") and (
+            (obj.get("motionless_count", 0) - camera_config.detect.stationary.threshold)
+            / camera_config.detect.fps
+            > processor.stationary_scan_duration
+        ):
+            return False
+        box = obj.get("box")
+        height, width = camera_config.frame_shape
+        return (
+            isinstance(box, (list, tuple))
+            and len(box) == 4
+            and all(
+                isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and math.isfinite(v)
+                for v in box
+            )
+            and 0 <= box[0] < box[2] <= width
+            and 0 <= box[1] < box[3] <= height
+        )
 
     def _process_deferred_results(self) -> None:
         """Drain results from deferred processors and perform IPC side-effects."""

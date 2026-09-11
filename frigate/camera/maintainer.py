@@ -172,7 +172,9 @@ class CameraMaintainer(threading.Thread):
         count = 10 if runtime else self.shm_count
         for i in range(count):
             frame_size = config.frame_shape_yuv[0] * config.frame_shape_yuv[1]
-            self.frame_manager.create(f"{config.name}_frame{i}", frame_size)
+            self.frame_manager.create_captured_frame(
+                f"{config.name}_frame{i}", frame_size
+            )
 
         capture_process = CameraCapture(
             config,

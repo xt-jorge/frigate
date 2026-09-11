@@ -223,7 +223,7 @@ class LicensePlatePostProcessor(LicensePlateProcessingMixin, PostProcessorApi): 
 
         # run the frame through lpr processing
         logger.debug(f"Post processing plate: {event_id}, {frame_time}")
-        self.lpr_process(keyframe_obj_data, frame)
+        self.lpr_process(keyframe_obj_data, frame, source_frame_time=frame_time)
 
     def handle_request(self, topic: str, request_data: dict) -> dict[str, Any] | None:
         if topic == EmbeddingsRequestEnum.reprocess_plate.value:

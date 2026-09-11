@@ -9,7 +9,7 @@ import NavPath from "@site/src/components/NavPath";
 
 Frigate can recognize license plates on vehicles and automatically add the detected characters to the `recognized_license_plate` field or a [known](#matching) name as a `sub_label` to tracked objects of type `car` or `motorcycle`. A common use case may be to read the license plates of cars pulling into a driveway or cars passing by on a street.
 
-LPR works best when the license plate is clearly visible to the camera. For moving vehicles, Frigate continuously refines the recognition process, keeping the most confident result. When a vehicle becomes stationary, LPR continues to run for a short time after to attempt recognition.
+LPR works best when the license plate is clearly visible to the camera. For moving vehicles, Frigate clusters successful readings to select plate text. A new sample refreshes the published confidence and capture time only when its text agrees with that selected representative. When a vehicle becomes stationary, LPR continues to run for a short time after to attempt recognition.
 
 :::info
 
@@ -26,7 +26,17 @@ When a plate is recognized, the details are:
 - Published via the `frigate/events` MQTT topic as a `sub_label` ([known](#matching)) or `recognized_license_plate` (unknown) for the `car` or `motorcycle` tracked object.
 - Published via the `frigate/tracked_object_update` MQTT topic with `name` (if [known](#matching)) and `plate`.
 
-Changes to a tracked object's recognized plate or its score, including clearing the plate, trigger a `frigate/events` update on the next processed frame. This also applies while the vehicle is stationary. Repeating the same plate and score does not trigger an additional update.
+Changes to a tracked object's recognized plate, score, or original OCR capture time trigger a `frigate/events` update on the next processed frame, including while stationary. A new successful sample of the same plate and score has a new capture time and can trigger an update. Merely processing another tracker frame does not refresh a previous reading.
+
+`recognized_license_plate` carries `[text, actual_sample_confidence]` in tracked-object messages, paired with `recognized_license_plate_frame_time` (original detector capture time in epoch seconds). An older cluster representative cannot borrow a newer sample's time or confidence. Failed OCR leaves the last accepted pair unchanged. Manual or historical edits without a sampled frame clear the capture time; they are not fresh OCR observations.
+
+### Current-frame sampling
+
+OCR consumes current detector packets independently of saved events and the best-thumbnail publication cadence. Only active true-positive tracks with a crop belonging to that exact detector frame are eligible. Existing initialization, motion, stationary-duration, plate-area, model, and recognition thresholds still apply.
+
+There is one synchronous OCR call at a time. Scheduling starts with the first eligible sample and uses the least recently served camera and track. It permits at most one attempt every 250 milliseconds globally and every 500 milliseconds per camera. These are compute ceilings, not promised recognition rates; slower inference reduces throughput. Each loop drains at most 32 video packets and keeps only the latest packet per camera, without a queue of copied images. Missing, overwritten, future-dated, or more-than-five-second-old frames are discarded. The shared capture buffer is copied before inference only if its original timestamp still matches the packet.
+
+Dedicated cameras without native `license_plate` detection use the same fair budget and retain their motion-based full-frame input, including when ordinary object detection is disabled. Other state classifiers retain their own processing; lifecycle callbacks do not invoke OCR a second time.
 
 ## Model Requirements
 
@@ -255,7 +265,7 @@ These rules must be defined at the global level of your `lpr` config.
 
 Navigate to <NavPath path="Settings > Enrichments > License plate recognition" />.
 
-- **Save debug plates**: Set to on to save captured text on plates for debugging. These images are stored in `/media/frigate/clips/lpr`, organized into subdirectories by `<camera>/<event_id>`, and named based on the capture timestamp.
+- **Save debug plates**: Set to on to save captured text on plates for debugging. These images are stored in `/media/frigate/clips/lpr`, organized into subdirectories by `<camera>/<event_id>`, and named based on the processing timestamp.
 
 </TabItem>
 <TabItem value="yaml">
@@ -461,7 +471,7 @@ With this setup:
 
 ### Using the Secondary LPR Pipeline (Without Frigate+)
 
-If you are not running a Frigate+ model, you can use Frigate's built-in secondary dedicated LPR pipeline. In this mode, Frigate bypasses the standard object detection pipeline and runs a local license plate detector model on the full frame whenever motion activity occurs.
+If you are not running a Frigate+ model, you can use Frigate's built-in secondary dedicated LPR pipeline. In this mode, Frigate bypasses the standard object detection pipeline and runs a local license plate detector model on eligible current full frames when motion activity occurs, within the sampling budget above.
 
 An example configuration for a dedicated LPR camera using the secondary pipeline:
 
@@ -562,12 +572,12 @@ cameras:
 With this setup:
 
 - The standard object detection pipeline is bypassed. Any detected license plates on dedicated LPR cameras are treated similarly to manual events in Frigate. You must **not** specify `license_plate` as an object to track.
-- The license plate detector runs on the full frame whenever motion is detected and processes frames according to your detect `fps` setting.
+- The license plate detector samples current full frames when motion is detected. Detect `fps` controls the available input frames; the shared OCR sampling budget limits inference.
 - Review items will always be classified as a `detection`.
 - Snapshots will always be saved.
 - Zones and object masks are **not** used.
 - The `frigate/events` MQTT topic will **not** publish tracked object updates with the license plate bounding box and score, though `frigate/reviews` will publish if recordings are enabled. If a plate is recognized as a [known](#matching) plate, publishing will occur with an updated `sub_label` field. If characters are recognized, publishing will occur with an updated `recognized_license_plate` field.
-- License plate snapshots are saved at the highest-scoring moment and appear in Explore.
+- License plate snapshots are saved from the latest successful sample agreeing with the selected plate text and appear in Explore.
 - Debug view will not show `license_plate` bounding boxes.
 
 ### Summary
@@ -589,7 +599,7 @@ By selecting the appropriate configuration, users can optimize their dedicated L
 - Disable the `improve_contrast` motion setting, especially if you are running LPR at night and the frame is mostly dark. This will prevent small pixel changes and smaller areas of motion from triggering license plate detection.
 - Ensure your camera's timestamp is covered with a motion mask so that it's not incorrectly detected as a license plate.
 - For non-Frigate+ users, you may need to change your camera settings for a clearer image or decrease your global `recognition_threshold` config if your plates are not being accurately recognized at night.
-- The secondary pipeline mode runs a local AI model on your CPU or GPU (depending on how `device` is configured) to detect plates. Increasing detect `fps` will increase resource usage proportionally.
+- The secondary pipeline mode runs a local AI model on your CPU or GPU (depending on how `device` is configured) to detect plates. Increasing detect `fps` increases available input frames and capture work; it does not override the shared OCR sampling ceiling.
 
 ## FAQ
 

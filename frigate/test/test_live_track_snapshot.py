@@ -125,11 +125,11 @@ class TestLiveTrackSnapshot(unittest.TestCase):
 
     def test_missing_frame_invalidates_the_snapshot_until_a_new_publication(self):
         self.fixture.start()
-        image = self.fixture.processor.frame_manager.get.return_value
-        self.fixture.processor.frame_manager.get.return_value = None
+        image = self.fixture.processor.frame_manager.get_captured_frame.return_value
+        self.fixture.processor.frame_manager.get_captured_frame.return_value = None
         self.fixture.advance()
         self.assertIsNone(self.state.get_live_tracks())
-        self.fixture.processor.frame_manager.get.return_value = image
+        self.fixture.processor.frame_manager.get_captured_frame.return_value = image
         self.fixture.advance()
         self.assertEqual(
             self.state.get_live_tracks(),

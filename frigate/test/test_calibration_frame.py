@@ -49,7 +49,7 @@ class TestCalibrationFrame(unittest.TestCase):
 
     def test_frame_and_metadata_advance_together_at_publication(self):
         before = self.state.get_calibration_frame()
-        self.fixture.processor.frame_manager.get.return_value[:] = 128
+        self.fixture.processor.frame_manager.get_captured_frame.return_value[:] = 128
         # The callback happens after live objects mutate but before the new image
         # is published. Reading here must still return the previous complete pair.
         observed = []

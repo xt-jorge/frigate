@@ -113,8 +113,8 @@ class PtzMotionEstimator:
                 f"{camera}: Motion estimator running - frame time: {frame_time}"
             )
 
-            yuv_frame = self.frame_manager.get(
-                frame_name, self.camera_config.frame_shape_yuv
+            yuv_frame = self.frame_manager.get_captured_frame(
+                frame_name, self.camera_config.frame_shape_yuv, frame_time
             )
 
             if yuv_frame is None:

@@ -5508,6 +5508,48 @@ paths:
       security:
         - frigateUserAuth: []
       x-required-role: camera
+  /{camera_name}/tracks/{track_id}/frame.jpg:
+    get:
+      tags:
+        - Media
+      summary: Get an atomic live track frame
+      description: |-
+        **Access:** Authenticated user with access to the referenced camera.
+
+        Returns a full, unannotated detector frame and its frozen track identity in X-Frigate-Track, with matching X-Frame-Time and X-Calibration-Frame. Only true-positive person, car, truck, bus and motorcycle tracks qualify. An explicit end returns 410; a fresh missing track returns 404 (unknown). Unavailable, stale or future frames return 503. No event-history fallback.
+      operationId: track_frame__camera_name__tracks__track_id__frame_jpg_get
+      parameters:
+        - name: camera_name
+          in: path
+          required: true
+          schema:
+            anyOf:
+              - type: string
+              - type: 'null'
+            title: Camera Name
+        - name: track_id
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+            title: Track Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+        - frigateUserAuth: []
+      x-required-role: camera
   /{camera_name}/latest.{extension}:
     get:
       tags:

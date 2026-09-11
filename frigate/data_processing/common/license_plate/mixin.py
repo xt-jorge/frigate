@@ -1170,9 +1170,11 @@ class LicensePlateProcessingMixin:
 
         return rep["plate"], rep["conf"], rep["char_confidences"], rep["area"]
 
-    def _generate_plate_event(self, camera: str, plate: str, plate_score: float) -> str:
+    def _generate_plate_event(
+        self, camera: str, plate: str, plate_score: float, source_frame_time: float
+    ) -> str:
         """Generate a unique ID for a plate event based on camera and text."""
-        now = datetime.datetime.now().timestamp()
+        now = source_frame_time
         rand_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
         event_id = f"{now}-{rand_id}"
 
@@ -1192,13 +1194,26 @@ class LicensePlateProcessingMixin:
         return event_id
 
     def lpr_process(
-        self, obj_data: dict[str, Any], frame: np.ndarray, dedicated_lpr: bool = False
+        self,
+        obj_data: dict[str, Any],
+        frame: np.ndarray,
+        dedicated_lpr: bool = False,
+        *,
+        source_frame_time: float,
     ) -> None:
         """Look for license plates in image."""
         self.metrics.alpr_pps.value = self.plates_rec_second.eps()
         self.metrics.yolov9_lpr_pps.value = self.plates_det_second.eps()
-        camera = obj_data if dedicated_lpr else obj_data["camera"]
-        current_time = int(datetime.datetime.now().timestamp())
+        camera = obj_data["camera"]
+        current_time = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        if (
+            isinstance(source_frame_time, bool)
+            or not isinstance(source_frame_time, (int, float))
+            or not math.isfinite(source_frame_time)
+            or source_frame_time <= 0
+            or source_frame_time > current_time
+        ):
+            return
 
         if not self.config.cameras[camera].lpr.enabled:
             return
@@ -1494,7 +1509,11 @@ class LicensePlateProcessingMixin:
         )
 
         # Check against minimum confidence threshold
-        if avg_confidence < self.lpr_config.recognition_threshold:
+        if (
+            not math.isfinite(avg_confidence)
+            or avg_confidence > 1
+            or avg_confidence < self.lpr_config.recognition_threshold
+        ):
             logger.debug(
                 f"{camera}: Average character confidence {avg_confidence} is less than recognition_threshold ({self.lpr_config.recognition_threshold})"
             )
@@ -1522,7 +1541,9 @@ class LicensePlateProcessingMixin:
                         )
                         break
             if plate_id is None:
-                plate_id = self._generate_plate_event(camera, top_plate, avg_confidence)
+                plate_id = self._generate_plate_event(
+                    camera, top_plate, avg_confidence, source_frame_time
+                )
                 logger.debug(
                     f"{camera}: New plate event for dedicated LPR camera {plate_id}: {top_plate}"
                 )
@@ -1542,7 +1563,7 @@ class LicensePlateProcessingMixin:
             "conf": avg_confidence,
             "char_confidences": top_char_confidences,
             "area": top_area,
-            "timestamp": current_time,
+            "timestamp": source_frame_time,
         }
 
         # Initialize or append to plates
@@ -1605,6 +1626,17 @@ class LicensePlateProcessingMixin:
                 self.camera_current_cars[camera] = []
             self.camera_current_cars[camera].append(id)
 
+        # Historical clustering may select an older reading. Only an actual new
+        # sample of that same text can refresh its confidence/capture-time pair.
+        previous_sample_time = self.detected_license_plates[id].get(
+            "recognized_license_plate_frame_time", 0
+        )
+        if rep_plate != top_plate or source_frame_time <= previous_sample_time:
+            return
+        self.detected_license_plates[id]["recognized_license_plate_frame_time"] = (
+            source_frame_time
+        )
+
         # Determine subLabel based on known plates, use regex matching
         # Default to the detected plate, use label name if there's a match
         sub_label = None
@@ -1630,10 +1662,10 @@ class LicensePlateProcessingMixin:
         # If it's a known plate, publish to sub_label
         if sub_label is not None:
             self.sub_label_publisher.publish(
-                (id, sub_label, rep_conf), EventMetadataTypeEnum.sub_label.value
+                (id, sub_label, avg_confidence), EventMetadataTypeEnum.sub_label.value
             )
 
-        # always publish to recognized_license_plate field
+        # Publish the confidence and capture time of this exact OCR sample.
         self.requestor.send_data(
             "tracked_object_update",
             json.dumps(
@@ -1641,16 +1673,23 @@ class LicensePlateProcessingMixin:
                     "type": TrackedObjectUpdateTypesEnum.lpr,
                     "name": sub_label,
                     "plate": rep_plate,
-                    "score": rep_conf,
+                    "score": avg_confidence,
                     "id": id,
                     "camera": camera,
-                    "timestamp": start,
+                    "timestamp": source_frame_time,
+                    "recognized_license_plate_frame_time": source_frame_time,
                     "plate_box": plate_box,
                 }
             ),
         )
         self.sub_label_publisher.publish(
-            (id, "recognized_license_plate", rep_plate, rep_conf),
+            (
+                id,
+                "recognized_license_plate",
+                rep_plate,
+                avg_confidence,
+                source_frame_time,
+            ),
             EventMetadataTypeEnum.attribute.value,
         )
 

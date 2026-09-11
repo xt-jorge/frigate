@@ -65,3 +65,20 @@ flowchart TD
     Stream -->|"video segments<br>(retain all)"| RecStore
     ObjectZ --> |detection snapshot|SnapStore
 ```
+
+## Exact capture ownership for live sampling
+
+Capture ring slots include an original frame timestamp beside their pixels.
+Capture publishes both under a short nonblocking lock. Detector, tracker-frame,
+and current OCR readers obtain an owned copy only when that stamp matches the
+queued packet; busy, incomplete, or overwritten slots are dropped. Locks are
+released before detection, OCR, or JPEG encoding, and capture never waits on a
+stopped reader. This prevents a reused slot's newer pixels from being labeled
+with an older packet's time.
+
+[Live track frames](/integrations/live-tracks) and
+[current LPR sampling](/configuration/license_plate_recognition#current-frame-sampling)
+use this capture ownership. They do not require recordings or persisted events.
+The stamped slot format changes with the paired producer/readers, so update the
+whole Frigate process together; old unstamped slots are not accepted by strict
+readers.

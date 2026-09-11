@@ -49,6 +49,7 @@ def capture_frames(
     stop_event: MpEvent,
 ) -> None:
     frame_size = frame_shape[0] * frame_shape[1]
+    last_capture_time = 0.0
     frame_rate = EventsPerSecond()
     frame_rate.start()
     skipped_eps = EventsPerSecond()
@@ -73,9 +74,11 @@ def capture_frames(
             skipped_fps.value = skipped_eps.eps()
             current_frame.value = datetime.now().timestamp()
             frame_name = f"{config.name}_frame{frame_index}"
-            frame_buffer = frame_manager.write(frame_name)
             try:
-                frame_buffer[:] = ffmpeg_process.stdout.read(frame_size)
+                # Drain ffmpeg before locking a slot; no I/O while a reader waits.
+                pixels = ffmpeg_process.stdout.read(frame_size)
+                if len(pixels) != frame_size:
+                    raise ValueError("Incomplete capture frame")
             except Exception:
                 # shutdown has been initiated
                 if stop_event.is_set():
@@ -93,6 +96,15 @@ def capture_frames(
 
                 continue
 
+            if (
+                current_frame.value <= last_capture_time
+                or not frame_manager.write_captured_frame(
+                    frame_name, pixels, current_frame.value
+                )
+            ):
+                skipped_eps.update()
+                continue
+            last_capture_time = current_frame.value
             frame_rate.update()
 
             # don't lock the queue to check, just try since it should rarely be full
