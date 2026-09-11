@@ -161,3 +161,34 @@ class TestLprSampleMetadata(unittest.TestCase):
         self.assertEqual(event["before"][CLOCK_FIELD], clock)
         self.assertEqual(event["after"][CLOCK_FIELD], clock)
         self.assertEqual(self.obj.to_dict()[CLOCK_FIELD], clock)
+
+    def test_dedicated_event_uses_nullable_end_and_json_instance_values(self):
+        self.fixture.state.tracked_objects.pop(EVENT_ID)
+        event = Event(
+            id=EVENT_ID,
+            label="license_plate",
+            start_time=100.0,
+            end_time=None,
+            data={},
+        )
+        with (
+            patch.object(Event, "get", return_value=event),
+            patch.object(event, "save") as save,
+        ):
+            self.sample(100.5, "SAMPLE123", 0.8)
+            self.assertEqual(event.data[PLATE_FIELD], "SAMPLE123")
+            self.assertEqual(event.data[f"{PLATE_FIELD}_score"], 0.8)
+            self.assertEqual(event.data[CLOCK_FIELD], 100.5)
+            save.assert_called_once()
+            save.reset_mock()
+            accepted = copy.deepcopy(event.data)
+            for rejected in (99.9, 100.4, 100.5):
+                self.sample(rejected, "REJECTED", 0.9)
+                self.assertEqual(event.data, accepted)
+            event.end_time = 101.0
+            self.sample(100.75, "ENDED", 0.9)
+            self.assertEqual(event.data, accepted)
+            save.assert_not_called()
+            self.processor.set_object_attribute(EVENT_ID, PLATE_FIELD, "MANUAL", 0.7)
+            self.assertEqual(event.data[PLATE_FIELD], "MANUAL")
+            self.assertIsNone(event.data[CLOCK_FIELD])

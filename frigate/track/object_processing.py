@@ -9,7 +9,7 @@ from collections import defaultdict
 from enum import Enum
 from multiprocessing import Queue as MpQueue
 from multiprocessing.synchronize import Event as MpEvent
-from typing import Any
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -504,7 +504,7 @@ class TrackedObjectProcessor(threading.Thread):
             elif (
                 event is None
                 or event.label != "license_plate"
-                or event.end_time is not None
+                or cast(float | None, event.end_time) is not None
                 or source_frame_time < event.start_time
                 or source_frame_time
                 <= (event.data.get("recognized_license_plate_frame_time") or 0)
@@ -522,14 +522,14 @@ class TrackedObjectProcessor(threading.Thread):
             )
 
         if event:
-            data = event.data
-            data[field_name] = field_value  # type: ignore[index]
+            data = cast(dict[str, Any], event.data)
+            data[field_name] = field_value
             if field_name == "recognized_license_plate":
                 data["recognized_license_plate_frame_time"] = source_frame_time
             if field_value is None:
-                data[f"{field_name}_score"] = None  # type: ignore[index]
+                data[f"{field_name}_score"] = None
             elif score is not None:
-                data[f"{field_name}_score"] = score  # type: ignore[index]
+                data[f"{field_name}_score"] = score
             event.data = data
             event.save()
 
