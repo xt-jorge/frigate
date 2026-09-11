@@ -2,13 +2,14 @@ import base64
 import datetime
 import json
 import logging
+import math
 import queue
 import threading
 from collections import defaultdict
 from enum import Enum
 from multiprocessing import Queue as MpQueue
 from multiprocessing.synchronize import Event as MpEvent
-from typing import Any
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -460,6 +461,7 @@ class TrackedObjectProcessor(threading.Thread):
         field_name: str,
         field_value: str | None,
         score: float | None,
+        source_frame_time: float | None = None,
     ) -> None:
         """Update attribute for given event id."""
         tracked_obj: TrackedObject | None = None
@@ -478,20 +480,57 @@ class TrackedObjectProcessor(threading.Thread):
         if not tracked_obj and not event:
             return
 
+        event_data: Any = event.data if event is not None else None
+        if source_frame_time is not None:
+            if (
+                field_name != "recognized_license_plate"
+                or isinstance(source_frame_time, bool)
+                or not isinstance(source_frame_time, (int, float))
+                or not math.isfinite(source_frame_time)
+                or source_frame_time <= 0
+                or source_frame_time
+                > datetime.datetime.now(datetime.timezone.utc).timestamp()
+            ):
+                return
+            if tracked_obj:
+                if (
+                    tracked_obj.false_positive
+                    or tracked_obj.obj_data.get("end_time") is not None
+                    or source_frame_time < tracked_obj.obj_data["start_time"]
+                    or source_frame_time > tracked_obj.obj_data["frame_time"]
+                    or source_frame_time <= tracked_obj.last_lpr_sample_time
+                ):
+                    return
+                tracked_obj.last_lpr_sample_time = source_frame_time
+            elif (
+                event is None
+                or event.label != "license_plate"
+                or cast(float | None, event.end_time) is not None
+                or source_frame_time < event.start_time
+                or source_frame_time
+                <= (event_data.get("recognized_license_plate_frame_time") or 0)
+            ):
+                return
+
         if tracked_obj:
+            if field_name == "recognized_license_plate":
+                tracked_obj.obj_data["recognized_license_plate_frame_time"] = (
+                    source_frame_time
+                )
             tracked_obj.obj_data[field_name] = (
                 field_value,
                 score,
             )
 
         if event:
-            data = event.data
-            data[field_name] = field_value  # type: ignore[index]
+            event_data[field_name] = field_value
+            if field_name == "recognized_license_plate":
+                event_data["recognized_license_plate_frame_time"] = source_frame_time
             if field_value is None:
-                data[f"{field_name}_score"] = None  # type: ignore[index]
+                event_data[f"{field_name}_score"] = None
             elif score is not None:
-                data[f"{field_name}_score"] = score  # type: ignore[index]
-            event.data = data
+                event_data[f"{field_name}_score"] = score
+            event.data = event_data
             event.save()
 
     def save_lpr_snapshot(self, payload: tuple) -> None:
@@ -614,6 +653,7 @@ class TrackedObjectProcessor(threading.Thread):
                     "type": "api",
                     "recognized_license_plate": plate,
                     "recognized_license_plate_score": score,
+                    "recognized_license_plate_frame_time": frame_time,
                 },
             )
         )
@@ -745,8 +785,16 @@ class TrackedObjectProcessor(threading.Thread):
                     (event_id, sub_label, score) = payload
                     self.set_sub_label(event_id, sub_label, score)
                 if topic.endswith(EventMetadataTypeEnum.attribute.value):
-                    (event_id, field_name, field_value, score) = payload
-                    self.set_object_attribute(event_id, field_name, field_value, score)
+                    if len(payload) not in (4, 5):
+                        continue
+                    event_id, field_name, field_value, score = payload[:4]
+                    self.set_object_attribute(
+                        event_id,
+                        field_name,
+                        field_value,
+                        score,
+                        payload[4] if len(payload) == 5 else None,
+                    )
                 elif topic.endswith(EventMetadataTypeEnum.lpr_event_create.value):
                     self.create_lpr_event(payload)
                 elif topic.endswith(EventMetadataTypeEnum.save_lpr_snapshot.value):

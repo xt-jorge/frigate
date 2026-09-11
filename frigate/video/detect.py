@@ -291,7 +291,9 @@ def process_frames(
         camera_metrics.detection_frame.value = frame_time
         ptz_metrics.frame_time.value = frame_time
 
-        frame = frame_manager.get(frame_name, (frame_shape[0] * 3 // 2, frame_shape[1]))
+        frame = frame_manager.get_captured_frame(
+            frame_name, (frame_shape[0] * 3 // 2, frame_shape[1]), frame_time
+        )
 
         if frame is None:
             logger.debug(

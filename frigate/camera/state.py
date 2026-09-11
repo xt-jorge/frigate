@@ -90,6 +90,36 @@ class CameraState:
                 return None
             return self.current_frame_time, self._current_frame_tracks
 
+    def get_track_frame(
+        self, track_id: str
+    ) -> (
+        tuple[
+            np.ndarray | None,
+            float,
+            tuple[str, str, float | None] | None,
+            tuple[tuple[int, int, int, int], ...],
+        ]
+        | None
+    ):
+        """Copy a frame only for an eligible track frozen in that same publication."""
+        with self.current_frame_lock:
+            if self._current_frame_tracks is None:
+                return None
+            track = next(
+                (item for item in self._current_frame_tracks if item[0] == track_id),
+                None,
+            )
+            frame_time = self.current_frame_time
+            vehicles = self._current_frame_vehicles
+            if (
+                track is None
+                or track[1] not in {"person", "car", "truck", "bus", "motorcycle"}
+                or track[2] is not None
+            ):
+                return None, frame_time, track, vehicles
+            frame = np.copy(self._current_frame)
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420), frame_time, track, vehicles
+
     def get_calibration_frame(
         self,
     ) -> tuple[np.ndarray, float, tuple[tuple[int, int, int, int], ...]]:
@@ -375,8 +405,8 @@ class CameraState:
         if self._discard_stale_resolution_state(current_detections):
             return
 
-        current_frame = self.frame_manager.get(
-            frame_name, self.camera_config.frame_shape_yuv
+        current_frame = self.frame_manager.get_captured_frame(
+            frame_name, self.camera_config.frame_shape_yuv, frame_time
         )
 
         tracked_objects = self.tracked_objects.copy()

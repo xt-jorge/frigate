@@ -41,6 +41,8 @@ def should_update_db(prev_event: dict[str, Any], current_event: dict[str, Any]) 
             or prev_event["velocity_angle"] != current_event["velocity_angle"]
             or prev_event["recognized_license_plate"]
             != current_event["recognized_license_plate"]
+            or prev_event.get("recognized_license_plate_frame_time")
+            != current_event.get("recognized_license_plate_frame_time")
             or prev_event["path_data"] != current_event["path_data"]
         ):
             return True
@@ -268,6 +270,10 @@ class EventProcessor(threading.Thread):
                     "recognized_license_plate"
                 ][1]
 
+                event[Event.data]["recognized_license_plate_frame_time"] = (
+                    event_data.get("recognized_license_plate_frame_time")
+                )
+
             # only overwrite attribute-type custom model fields in the database if they're set
             for name, model_config in self.config.classification.custom.items():
                 if (
@@ -335,6 +341,9 @@ class EventProcessor(threading.Thread):
                 event[Event.data]["recognized_license_plate_score"] = event_data[
                     "score"
                 ]
+                event[Event.data]["recognized_license_plate_frame_time"] = (
+                    event_data.get("recognized_license_plate_frame_time")
+                )
             Event.insert(event).execute()
         elif event_type == EventStateEnum.end:
             event = {

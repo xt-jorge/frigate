@@ -1,7 +1,10 @@
 """Utilities for creating and manipulating image frames."""
 
 import datetime
+import fcntl
 import logging
+import math
+import struct
 import subprocess as sp
 import threading
 from abc import ABC, abstractmethod
@@ -1002,6 +1005,14 @@ class FrameManager(ABC):
         pass
 
     @abstractmethod
+    def write_captured_frame(self, name: str, pixels: bytes, frame_time: float) -> bool:
+        pass
+
+    @abstractmethod
+    def get_captured_frame(self, name: str, shape, frame_time: float):
+        pass
+
+    @abstractmethod
     def close(self, name: str):
         pass
 
@@ -1075,6 +1086,89 @@ class SharedMemoryFrameManager(FrameManager):
         self.shm_store[name] = shm
         return shm.buf
 
+    def create_captured_frame(self, name: str, size: int) -> None:
+        """Initialize a capture ring slot only at the camera's stopped boundary."""
+        self.create(name, size + 8)
+        shm = UntrackedSharedMemory(name=name)
+        try:
+            if shm.size != size + 8:
+                raise ValueError("Capture slot has an unexpected size")
+            fcntl.flock(shm._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                struct.pack_into("!d", shm.buf, size, 0.0)
+            finally:
+                fcntl.flock(shm._fd, fcntl.LOCK_UN)
+        finally:
+            shm.close()
+
+    def write_captured_frame(self, name: str, pixels: bytes, frame_time: float) -> bool:
+        """Publish complete pixels and their original clock, or drop contention."""
+        if (
+            isinstance(frame_time, bool)
+            or not isinstance(frame_time, (int, float))
+            or not math.isfinite(frame_time)
+            or frame_time <= 0
+        ):
+            return False
+        try:
+            # A fresh open description is essential: flock on a shared/cached
+            # descriptor would not serialize another thread using that descriptor.
+            shm = UntrackedSharedMemory(name=name)
+        except FileNotFoundError:
+            return False
+        try:
+            if shm.size != len(pixels) + 8:
+                return False
+            try:
+                fcntl.flock(shm._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            try:
+                previous = struct.unpack_from("!d", shm.buf, len(pixels))[0]
+                if math.isfinite(previous) and frame_time <= previous:
+                    return False
+                # An interrupted copy must never expose a valid old timestamp.
+                struct.pack_into("!d", shm.buf, len(pixels), 0.0)
+                shm.buf[: len(pixels)] = pixels
+                struct.pack_into("!d", shm.buf, len(pixels), frame_time)
+                return True
+            finally:
+                fcntl.flock(shm._fd, fcntl.LOCK_UN)
+        finally:
+            shm.close()
+
+    def get_captured_frame(
+        self, name: str, shape, frame_time: float
+    ) -> np.ndarray | None:
+        """Copy only the exact queued capture, never a newer reused ring slot."""
+        if (
+            isinstance(frame_time, bool)
+            or not isinstance(frame_time, (int, float))
+            or not math.isfinite(frame_time)
+            or frame_time <= 0
+        ):
+            return None
+        try:
+            shm = UntrackedSharedMemory(name=name)
+        except FileNotFoundError:
+            return None
+        try:
+            size = int(np.prod(shape))
+            if shm.size != size + 8:
+                return None
+            try:
+                fcntl.flock(shm._fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None
+            try:
+                if struct.unpack_from("!d", shm.buf, size)[0] != frame_time:
+                    return None
+                return np.ndarray(shape, dtype=np.uint8, buffer=shm.buf).copy()
+            finally:
+                fcntl.flock(shm._fd, fcntl.LOCK_UN)
+        finally:
+            shm.close()
+
     def write(self, name: str) -> Optional[memoryview]:
         try:
             if name in self.shm_store:
@@ -1091,7 +1185,7 @@ class SharedMemoryFrameManager(FrameManager):
         try:
             required = int(np.prod(shape))
             shm = self.shm_store.get(name)
-            if shm is not None and shm.size != required:
+            if shm is not None and shm.size not in (required, required + 8):
                 # stale cached ref from a same-name recreate — drop and reopen
                 try:
                     shm.close()
@@ -1101,7 +1195,7 @@ class SharedMemoryFrameManager(FrameManager):
                 shm = None
             if shm is None:
                 shm = UntrackedSharedMemory(name=name)
-                if shm.size != required:
+                if shm.size not in (required, required + 8):
                     # mid-recreate: OS segment doesn't match shape yet; skip
                     try:
                         shm.close()

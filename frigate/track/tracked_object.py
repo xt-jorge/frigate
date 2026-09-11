@@ -70,6 +70,7 @@ class TrackedObject:
         self.thumbnail_data: dict[str, Any] | None = None
         self.last_updated: float = 0
         self.last_published: float = 0
+        self.last_lpr_sample_time: float = 0
         self.frame = None
         self.active = True
         self.pending_loitering = False
@@ -341,7 +342,9 @@ class TrackedObject:
             # OCR metadata arrives between frames; compare with the last event.
             if self.obj_data.get("recognized_license_plate") != self.previous.get(
                 "recognized_license_plate"
-            ):
+            ) or self.obj_data.get(
+                "recognized_license_plate_frame_time"
+            ) != self.previous.get("recognized_license_plate_frame_time"):
                 significant_change = True
 
             # if the state changed between stationary and active
@@ -433,6 +436,9 @@ class TrackedObject:
             "velocity_angle": self.velocity_angle,
             "path_data": self.path_data.copy(),
             "recognized_license_plate": self.obj_data.get("recognized_license_plate"),
+            "recognized_license_plate_frame_time": self.obj_data.get(
+                "recognized_license_plate_frame_time"
+            ),
         }
 
         # Add any other obj_data keys (e.g. custom attribute fields) not yet included

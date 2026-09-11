@@ -49,7 +49,7 @@ class TestRecognizedPlatePublication(unittest.TestCase):
         self.processor.requestor = MagicMock()
         self.processor.ptz_autotracker_thread = MagicMock()
         self.processor.frame_manager = MagicMock()
-        self.processor.frame_manager.get.return_value = np.zeros(
+        self.processor.frame_manager.get_captured_frame.return_value = np.zeros(
             config.cameras[CAMERA].frame_shape_yuv, dtype=np.uint8
         )
         self.processor.camera_states = {}

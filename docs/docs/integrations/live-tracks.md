@@ -56,6 +56,31 @@ Only a returned non-null `end_time` reports the tracker's explicit end. Ended
 tracks are retained only until normal tracker cleanup; this is not an event
 history API. Responses use `Cache-Control: private, no-store`.
 
+## Atomic current frame
+
+```text
+GET /api/front/tracks/1789140000.123456-abcdef/frame.jpg
+```
+
+For a true-positive `person`, `car`, `truck`, `bus`, or `motorcycle`, this returns
+one full, unannotated detector JPEG. It does not crop to the track. The track
+identity and pixels are copied from the same published frame under the camera's
+frame lock. The detector and camera first verify the original capture stamp of
+the shared-memory ring slot; an overwritten or busy slot is discarded.
+
+`X-Frigate-Track` is a JSON object of at most 1024 bytes containing exactly `id`,
+`camera`, `label`, and `end_time`. `X-Frame-Time` is the original capture time in
+seconds. `X-Calibration-Frame` contains the same image dimensions, capture time
+in milliseconds, and frozen vehicle boxes used by the calibration endpoint.
+The response is private and must not be cached.
+
+The route requires access to that camera. A fresh snapshot with a missing or
+unsupported track returns HTTP 404 (unknown, retryable), and only an explicit
+track end returns HTTP 410. Missing, disabled, stale (over five seconds old),
+future-dated, or invalid frame state returns HTTP 503. JPEG/metadata failures also
+return 503, never a substituted frame. There is no Event lookup or history
+fallback. A frame proves only a current tracked object, not recognized identity.
+
 ## Historical events and paired updates
 
 The existing `/api/events` endpoint continues to return persisted event history.

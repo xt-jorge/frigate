@@ -70,8 +70,8 @@ Message published for each changed tracked object. The first message is publishe
     "current_estimated_speed": 0.71, // current estimated speed (mph or kph) for objects moving through zones with speed estimation enabled
     "average_estimated_speed": 14.3, // average estimated speed (mph or kph) for objects moving through zones with speed estimation enabled
     "velocity_angle": 180, // direction of travel relative to the frame for objects moving through zones with speed estimation enabled
-    "recognized_license_plate": "ABC12345", // a recognized license plate for car objects
-    "recognized_license_plate_score": 0.933451
+    "recognized_license_plate": ["ABC12345", 0.933451], // text and actual OCR sample confidence
+    "recognized_license_plate_frame_time": 1607123961.5 // original OCR capture, independent of tracker frame_time
   },
   "after": {
     "id": "1607123955.475377-mxklsc",
@@ -119,8 +119,8 @@ Message published for each changed tracked object. The first message is publishe
     "current_estimated_speed": 0.77, // current estimated speed (mph or kph) for objects moving through zones with speed estimation enabled
     "average_estimated_speed": 14.31, // average estimated speed (mph or kph) for objects moving through zones with speed estimation enabled
     "velocity_angle": 180, // direction of travel relative to the frame for objects moving through zones with speed estimation enabled
-    "recognized_license_plate": "ABC12345", // a recognized license plate for car objects
-    "recognized_license_plate_score": 0.933451
+    "recognized_license_plate": ["ABC12345", 0.933451], // text and actual OCR sample confidence
+    "recognized_license_plate_frame_time": 1607123961.5 // original OCR capture, independent of tracker frame_time
   }
 }
 ```
@@ -156,7 +156,7 @@ Published after each recognition attempt, regardless of whether the score meets 
 
 #### License Plate Recognition Update
 
-Published when a license plate is recognized on a car object. See the [License Plate Recognition](/configuration/license_plate_recognition) documentation for details.
+Published for a new successful OCR sample whose text agrees with the selected cluster representative. `score` belongs to that sample, and both `timestamp` and `recognized_license_plate_frame_time` are its original detector capture time in epoch seconds. An old reading is never refreshed just because tracking continues. Manual edits clear the sampled capture time. See the [License Plate Recognition](/configuration/license_plate_recognition) documentation for details.
 
 ```json
 {
@@ -167,6 +167,7 @@ Published when a license plate is recognized on a car object. See the [License P
   "score": 0.95,
   "camera": "driveway_cam",
   "timestamp": 1607123958.748393,
+  "recognized_license_plate_frame_time": 1607123958.748393,
   "plate_box": [917, 487, 1029, 529] // box coordinates of the detected license plate in the frame
 }
 ```

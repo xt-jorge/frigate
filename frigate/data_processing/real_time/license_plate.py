@@ -62,9 +62,15 @@ class LicensePlateRealTimeProcessor(LicensePlateProcessingMixin, RealTimeProcess
         obj_data: dict[str, Any],
         frame: np.ndarray,
         dedicated_lpr: bool = False,
+        *,
+        source_frame_time: float | None = None,
     ) -> None:
         """Look for license plates in image."""
-        self.lpr_process(obj_data, frame, dedicated_lpr)
+        if source_frame_time is None:
+            return
+        self.lpr_process(
+            obj_data, frame, dedicated_lpr, source_frame_time=source_frame_time
+        )
 
     def handle_request(
         self, topic: str, request_data: dict[str, Any]
