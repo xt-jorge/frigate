@@ -419,6 +419,17 @@ def process_frames(
                             get_cluster_region(frame_shape, region_min_size, [0], [box])
                         )
 
+            if occupancy_due and bounds and occupancy_stable:
+                # Do not let a reused stationary tuple win reduction over its
+                # newly measured box and hide the original detector clock.
+                stationary_object_ids = [
+                    obj_id
+                    for obj_id in stationary_object_ids
+                    if not intersects_any(
+                        object_tracker.tracked_objects[obj_id]["box"], regions
+                    )
+                ]
+
             # resize regions and detect
             # seed with stationary objects
             detections = [

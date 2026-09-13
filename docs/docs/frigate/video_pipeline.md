@@ -111,6 +111,10 @@ Commissioned occupancy zones are selected internally through
 per second, the pipeline reuses ordinary detector crops covering each zone or
 adds a crop of that zone's bounds to the existing detector. Other cameras have
 no additional scan. This replaces the per-vehicle stationary update setting.
+On these cameras, genuine advancing detector measurements also publish ordinary
+object events at up to four times per second so boundary and approach consumers
+remain current. Predictions and reused stationary samples never renew that
+clock. The event updates do not cause additional inference.
 
 `frigate/occupancy_frames` publishes the original capture `frame_time`, frame
 `width` and `height`, successful detector `coverage` rectangles in pixels, and

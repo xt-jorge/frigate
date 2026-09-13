@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import math
 import os
 import threading
 from collections import defaultdict
@@ -513,6 +514,24 @@ class CameraState:
             ):
                 publish_threshold = 1
 
+            detector_time = updated_obj.obj_data.get("detector_observed_at")
+            previous_detector_time = updated_obj.previous.get("detector_observed_at")
+            # Boundary and approach consumers still use ordinary object events.
+            # Only genuine measurements advance them, without another detector run.
+            detector_update = (
+                bool(self.camera_config.detect.occupancy_zones)
+                and not updated_obj.false_positive
+                and isinstance(detector_time, (int, float))
+                and not isinstance(detector_time, bool)
+                and math.isfinite(detector_time)
+                and detector_time > 0
+                and detector_time == frame_time == updated_obj.obj_data["frame_time"]
+                and (
+                    previous_detector_time is None
+                    or detector_time > previous_detector_time
+                )
+                and frame_time >= updated_obj.last_published + 0.25
+            )
             if (
                 (
                     frame_time - updated_obj.last_published > publish_threshold
@@ -520,6 +539,7 @@ class CameraState:
                 )
                 or significant_update
                 or path_update
+                or detector_update
             ):
                 # call event handlers
                 for c in self.callbacks["update"]:

@@ -73,7 +73,10 @@ class TestDetectorObservationTime(unittest.TestCase):
     def test_pipeline_keeps_stationary_seed_clock_with_new_detector_result(self):
         self.run_stationary_pipeline()
 
-    def run_stationary_pipeline(self):
+    def test_occupancy_scan_replaces_stationary_seed_with_original_detector_clock(self):
+        self.run_stationary_pipeline(True)
+
+    def run_stationary_pipeline(self, occupancy=False):
         old = self.observe(100.0, 100.0)
         old["motionless_count"] = 10000
         fresh = ("car", 0.95, (10, 10, 50, 50), 1600, 1.0, (0, 0, 320, 240))
@@ -87,8 +90,12 @@ class TestDetectorObservationTime(unittest.TestCase):
         stop.is_set.return_value = False
         config = self.fixture.processor.config
         config.cameras["front"].detect.enabled = True
+        config.cameras["front"].detect.occupancy_zones = (
+            ["approach"] if occupancy else []
+        )
         with (
             patch("frigate.video.detect.CameraConfigUpdateSubscriber") as subscriber,
+            patch("frigate.video.detect.ptz_moving_at_frame_time", return_value=False),
             patch("frigate.video.detect.get_cluster_candidates", return_value=[]),
             patch(
                 "frigate.video.detect.get_startup_regions",
@@ -96,7 +103,7 @@ class TestDetectorObservationTime(unittest.TestCase):
             ),
             patch(
                 "frigate.video.detect.detect",
-                return_value=[fresh],
+                return_value=[self.detection] if occupancy else [fresh],
             ),
         ):
             subscriber.return_value.check_for_updates.return_value = []
@@ -123,5 +130,7 @@ class TestDetectorObservationTime(unittest.TestCase):
         }
         self.assertEqual(
             clocks,
-            {self.detection[2]: 100.0, fresh[2]: 101.0},
+            {self.detection[2]: 101.0}
+            if occupancy
+            else {self.detection[2]: 100.0, fresh[2]: 101.0},
         )
