@@ -14,7 +14,6 @@ from frigate.camera import CameraMetrics, PTZMetrics
 from frigate.comms.inter_process import InterProcessRequestor
 from frigate.config import CameraConfig, DetectConfig, LoggerConfig, ModelConfig
 from frigate.config.camera.camera import CameraTypeEnum
-from frigate.config.camera.detect import VEHICLE_DETECTOR_LABELS
 from frigate.config.camera.updater import (
     CameraConfigUpdateEnum,
     CameraConfigUpdateSubscriber,
@@ -50,6 +49,7 @@ from frigate.util.object import (
 )
 from frigate.util.process import FrigateProcess
 from frigate.util.time import get_tomorrow_at_time
+from frigate.video.occupancy import contains, occupancy_frame, zone_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +208,7 @@ def process_frames(
 
     startup_scan = True
     stationary_frame_counter = 0
+    last_occupancy_frame = float("-inf")
     camera_enabled = True
 
     region_min_size = get_min_region_size(model_config)
@@ -307,6 +308,14 @@ def process_frames(
 
         regions = []
         consolidated_detections = []
+        occupancy = None
+        occupancy_due = (
+            bool(camera_config.detect.occupancy_zones)
+            and frame_time - last_occupancy_frame >= 0.25
+        )
+        bounds = zone_bounds(camera_config) if occupancy_due else None
+        coverage = []
+        observed_detections = []
 
         # if detection is disabled
         if not camera_config.detect.enabled:
@@ -325,11 +334,7 @@ def process_frames(
                     obj["id"]
                     for obj in object_tracker.tracked_objects.values()
                     # if it has exceeded the stationary threshold
-                    if not (
-                        camera_config.detect.vehicle_detector_updates
-                        and obj["label"] in VEHICLE_DETECTOR_LABELS
-                    )
-                    and obj["motionless_count"]
+                    if obj["motionless_count"]
                     >= camera_config.detect.stationary.threshold
                     # and it hasn't disappeared
                     and object_tracker.disappeared[obj["id"]] == 0
@@ -402,6 +407,18 @@ def process_frames(
                     regions.append(region)
                 startup_scan = False
 
+            # Refresh only existing occupancy zones. Normal motion/track crops
+            # already covering a zone cost no additional detector invocation.
+            occupancy_stable = occupancy_due and not ptz_moving_at_frame_time(
+                frame_time, ptz_metrics.start_time.value, ptz_metrics.stop_time.value
+            )
+            if occupancy_due and bounds and occupancy_stable:
+                for box in bounds:
+                    if not any(contains(region, box) for region in regions):
+                        regions.append(
+                            get_cluster_region(frame_shape, region_min_size, [0], [box])
+                        )
+
             # resize regions and detect
             # seed with stationary objects
             detections = [
@@ -440,6 +457,9 @@ def process_frames(
                     camera_config.objects.track,
                     camera_config.objects.filters,
                 )
+                if occupancy_due and object_detector.last_detection_successful is True:
+                    coverage.append(region)
+                    observed_detections.extend(observed)
                 for detection in observed:
                     detector_times[id(detection)] = frame_time
                 detections.extend(observed)
@@ -463,6 +483,20 @@ def process_frames(
             # else, just update the frame times for the stationary objects
             else:
                 object_tracker.update_frame_times(frame_name, frame_time)
+
+        if occupancy_due:
+            if not camera_config.detect.enabled or not occupancy_stable:
+                coverage = []
+                observed_detections = []
+            occupancy = occupancy_frame(
+                camera_config.name,
+                frame_time,
+                frame_shape,
+                bounds,
+                coverage,
+                reduce_detections(frame_shape, observed_detections),
+            )
+            last_occupancy_frame = frame_time
 
         # build detections
         detections = {}
@@ -577,6 +611,7 @@ def process_frames(
                     detections,
                     motion_boxes,
                     regions,
+                    occupancy,
                 )
             )
             camera_metrics.detection_fps.value = object_detector.fps.eps()

@@ -106,9 +106,20 @@ request, and missing asynchronous outputs produce no detections. The five-second
 response deadline is not extended by unrelated responses. Input locks are
 released before inference; one fixed input buffer is retained per camera.
 
-Selected cameras can enable
-[vehicle detector updates](/configuration/stationary_objects#selected-camera-vehicle-detector-updates)
-to redetect stopped vehicles on each processed detect frame and publish genuine
-advancing detector measurements at up to 5 Hz per object. The default remains
-disabled. This cadence never renews a prediction's detector clock and does not
-guarantee that inference or delivery meets a consumer's freshness deadline.
+Commissioned occupancy zones are selected internally through
+`detect.occupancy_zones`, referencing existing camera zones. At most four times
+per second, the pipeline reuses ordinary detector crops covering each zone or
+adds a crop of that zone's bounds to the existing detector. Other cameras have
+no additional scan. This replaces the per-vehicle stationary update setting.
+
+`frigate/occupancy_frames` publishes the original capture `frame_time`, frame
+`width` and `height`, successful detector `coverage` rectangles in pixels, and
+all current raw filtered detector `objects` (`label`, pixel `box`, and
+`detector_observed_at`). It includes uninitialized detections and excludes
+stationary seed boxes and tracker predictions. `complete` requires successful
+coverage of every selected zone in that exact frame. Missing zones, disabled
+detection, PTZ movement, and detector failures cannot produce complete empty
+coverage. An empty object array with complete coverage is a measured empty
+sample; an empty array without coverage is unknown. Consumers must enforce
+capture freshness, polygon overlap, and clear confirmation. This is visual
+occupancy evidence, not a replacement for physical safety interlocks.

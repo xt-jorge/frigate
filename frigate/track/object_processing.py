@@ -812,6 +812,7 @@ class TrackedObjectProcessor(threading.Thread):
                     current_tracked_objects,
                     motion_boxes,
                     regions,
+                    occupancy,
                 ) = self.tracked_objects_queue.get(True, 1)
             except queue.Empty:
                 continue
@@ -831,6 +832,11 @@ class TrackedObjectProcessor(threading.Thread):
             camera_state.update(
                 frame_name, frame_time, current_tracked_objects, motion_boxes, regions
             )
+
+            if occupancy is not None:
+                self.dispatcher.publish(
+                    "occupancy_frames", json.dumps(occupancy), retain=False
+                )
 
             self.update_mqtt_motion(camera, frame_time, motion_boxes)
 

@@ -4,8 +4,6 @@ from pydantic import Field, model_validator
 
 from ..base import FrigateBaseModel
 
-VEHICLE_DETECTOR_LABELS = ("car", "truck", "bus", "motorcycle")
-
 __all__ = ["DetectConfig", "StationaryConfig", "StationaryMaxFramesConfig"]
 
 
@@ -69,10 +67,10 @@ class DetectConfig(FrigateBaseModel):
         title="Detect FPS",
         description="Desired frames per second to run detection on; lower values reduce CPU usage (recommended value is 5, only set higher - at most 10 - if tracking extremely fast moving objects).",
     )
-    vehicle_detector_updates: bool = Field(
-        default=False,
-        title="Vehicle detector updates",
-        description="Redetect stationary vehicles each detect frame and publish genuine detector updates at up to 5 Hz for this camera. Requires detect FPS of at least 5; does not guarantee processing latency or vehicle clearance.",
+    occupancy_zones: list[str] = Field(
+        default_factory=list,
+        title="Occupancy zones",
+        description="Existing zones requiring fresh detector coverage, supplied by the commissioning owner. Reuses normal detection regions and scans uncovered zone bounds at most four times per second.",
     )
     min_initialized: Optional[int] = Field(
         default=None,
@@ -101,9 +99,5 @@ class DetectConfig(FrigateBaseModel):
         if (self.width is None) != (self.height is None):
             raise ValueError(
                 "detect -> both width and height must be specified together, or both omitted"
-            )
-        if self.vehicle_detector_updates and self.fps < 5:
-            raise ValueError(
-                "vehicle_detector_updates requires detect fps of at least 5"
             )
         return self

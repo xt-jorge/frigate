@@ -637,9 +637,9 @@
       "label": "Detect FPS",
       "description": "Desired frames per second to run detection on; lower values reduce CPU usage (recommended value is 5, only set higher - at most 10 - if tracking extremely fast moving objects)."
     },
-    "vehicle_detector_updates": {
-      "label": "Vehicle detector updates",
-      "description": "Redetect stationary vehicles each detect frame and publish genuine detector updates at up to 5 Hz for this camera. Requires detect FPS of at least 5; does not guarantee processing latency or vehicle clearance."
+    "occupancy_zones": {
+      "label": "Occupancy zones",
+      "description": "Existing zones requiring fresh detector coverage, supplied by the commissioning owner. Reuses normal detection regions and scans uncovered zone bounds at most four times per second."
     },
     "min_initialized": {
       "label": "Minimum initialization frames",

@@ -406,6 +406,7 @@ class RemoteObjectDetector:
 
     def detect(self, tensor_input: np.ndarray, threshold: float = 0.4) -> list:
         detections: list = []
+        self.last_detection_successful = False
 
         if self.stop_event.is_set():
             return detections
@@ -461,6 +462,7 @@ class RemoteObjectDetector:
             detections.append(
                 (self.labels[int(d[0])], float(d[1]), (d[2], d[3], d[4], d[5]))
             )
+        self.last_detection_successful = True
         self.fps.update()
         return detections
 
