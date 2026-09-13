@@ -98,6 +98,10 @@
       "label": "Detect FPS",
       "description": "Desired frames per second to run detection on; lower values reduce CPU usage (recommended value is 5, only set higher - at most 10 - if tracking extremely fast moving objects)."
     },
+    "vehicle_detector_updates": {
+      "label": "Vehicle detector updates",
+      "description": "Redetect stationary vehicles each detect frame and publish genuine detector updates at up to 5 Hz for this camera. Requires detect FPS of at least 5; does not guarantee processing latency or vehicle clearance."
+    },
     "min_initialized": {
       "label": "Minimum initialization frames",
       "description": "Number of consecutive detection hits required before creating a tracked object. Increase to reduce false initializations. Default value is fps divided by 2."

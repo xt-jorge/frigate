@@ -71,6 +71,12 @@ class TestDetectorObservationTime(unittest.TestCase):
         self.assertEqual(obj.to_dict()["detector_observed_at"], 99.5)
 
     def test_pipeline_keeps_stationary_seed_clock_with_new_detector_result(self):
+        self.run_stationary_pipeline(False)
+
+    def test_selected_camera_redetects_stationary_vehicle(self):
+        self.run_stationary_pipeline(True)
+
+    def run_stationary_pipeline(self, selected):
         old = self.observe(100.0, 100.0)
         old["motionless_count"] = 10000
         fresh = ("car", 0.95, (10, 10, 50, 50), 1600, 1.0, (0, 0, 320, 240))
@@ -84,6 +90,7 @@ class TestDetectorObservationTime(unittest.TestCase):
         stop.is_set.return_value = False
         config = self.fixture.processor.config
         config.cameras["front"].detect.enabled = True
+        config.cameras["front"].detect.vehicle_detector_updates = selected
         with (
             patch("frigate.video.detect.CameraConfigUpdateSubscriber") as subscriber,
             patch("frigate.video.detect.get_cluster_candidates", return_value=[]),
@@ -91,7 +98,10 @@ class TestDetectorObservationTime(unittest.TestCase):
                 "frigate.video.detect.get_startup_regions",
                 return_value=[(0, 0, 320, 240)],
             ),
-            patch("frigate.video.detect.detect", return_value=[fresh]),
+            patch(
+                "frigate.video.detect.detect",
+                return_value=[self.detection] if selected else [fresh],
+            ),
         ):
             subscriber.return_value.check_for_updates.return_value = []
             process_frames(
@@ -115,4 +125,9 @@ class TestDetectorObservationTime(unittest.TestCase):
         clocks = {
             tuple(obj["box"]): obj["detector_observed_at"] for obj in published.values()
         }
-        self.assertEqual(clocks, {self.detection[2]: 100.0, fresh[2]: 101.0})
+        self.assertEqual(
+            clocks,
+            {self.detection[2]: 101.0}
+            if selected
+            else {self.detection[2]: 100.0, fresh[2]: 101.0},
+        )
