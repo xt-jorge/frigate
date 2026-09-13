@@ -67,7 +67,10 @@ from frigate.models import (
     Trigger,
     User,
 )
-from frigate.object_detection.base import ObjectDetectProcess
+from frigate.object_detection.base import (
+    DETECTOR_REQUEST_HEADER_SIZE,
+    ObjectDetectProcess,
+)
 from frigate.output.output import OutputProcess
 from frigate.ptz.autotrack import PtzAutoTrackerThread
 from frigate.ptz.onvif import OnvifController
@@ -376,20 +379,20 @@ class FrigateApp:
                 shm_in = UntrackedSharedMemory(
                     name=name,
                     create=True,
-                    size=largest_frame,
+                    size=largest_frame + DETECTOR_REQUEST_HEADER_SIZE,
                 )
             except FileExistsError:
                 shm_in = UntrackedSharedMemory(name=name)
-
-            try:
-                shm_out = UntrackedSharedMemory(
-                    name=f"out-{name}", create=True, size=20 * 6 * 4
-                )
-            except FileExistsError:
-                shm_out = UntrackedSharedMemory(name=f"out-{name}")
+                if shm_in.size < largest_frame + DETECTOR_REQUEST_HEADER_SIZE:
+                    shm_in.close()
+                    shm_in.unlink()
+                    shm_in = UntrackedSharedMemory(
+                        name=name,
+                        create=True,
+                        size=largest_frame + DETECTOR_REQUEST_HEADER_SIZE,
+                    )
 
             self.detection_shms.append(shm_in)
-            self.detection_shms.append(shm_out)
 
         for name, detector_config in self.config.detectors.items():
             self.detectors[name] = ObjectDetectProcess(

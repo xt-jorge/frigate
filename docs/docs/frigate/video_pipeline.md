@@ -82,3 +82,26 @@ use this capture ownership. They do not require recordings or persisted events.
 The stamped slot format changes with the paired producer/readers, so update the
 whole Frigate process together; old unstamped slots are not accepted by strict
 readers.
+
+## Detector observation time
+
+Tracked-object event payloads expose `detector_observed_at` as epoch seconds for
+the real detector result that supplied the current box. It is separate from
+`frame_time`: stationary refreshes can advance the tracker frame while reusing
+the box. The detector clock stays unchanged for those refreshes, stationary
+seeds mixed with new regional detections, and prediction-only updates. Missing
+provenance remains `null`; it is never replaced with the current frame clock.
+
+The field describes a detector measurement, not complete visibility, vehicle
+identity, direction, or passage. A repeated detector clock is the same
+measurement even if a later tracker event republishes it. Consumers requiring
+fresh detections must validate this original clock and their own capture,
+geometry and continuity bounds.
+
+Detector IPC binds each request to a UUID stored with its input tensor under a
+shared-memory lock. Workers copy only the matching generation before inference;
+a queued request whose input was replaced is refused. Responses carry the same
+UUID and a bounded output snapshot. Late responses cannot satisfy a later
+request, and missing asynchronous outputs produce no detections. The five-second
+response deadline is not extended by unrelated responses. Input locks are
+released before inference; one fixed input buffer is retained per camera.

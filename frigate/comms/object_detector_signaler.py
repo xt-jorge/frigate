@@ -2,6 +2,7 @@
 
 import threading
 
+import numpy as np
 import zmq
 
 SOCKET_PUB = "ipc:///tmp/cache/detector_pub"
@@ -54,9 +55,18 @@ class ObjectDetectorPublisher:
         self.socket = self.context.socket(zmq.PUB)
         self.socket.connect(SOCKET_PUB)
 
-    def publish(self, sub_topic: str = "") -> None:
-        """Publish message."""
-        self.socket.send_string(f"{self.topic}{sub_topic}/")
+    def publish(
+        self, sub_topic: str, request_id: str, detections: np.ndarray | None
+    ) -> None:
+        """Publish one generation and its immutable bounded output snapshot."""
+        payload = b""
+        if detections is not None:
+            output = np.asarray(detections, dtype=np.float32)
+            if output.shape == (20, 6) and np.isfinite(output).all():
+                payload = output.tobytes()
+        self.socket.send_multipart(
+            [f"{self.topic}{sub_topic}/".encode(), request_id.encode(), payload]
+        )
 
     def stop(self) -> None:
         self.socket.close()
@@ -75,14 +85,23 @@ class ObjectDetectorSubscriber:
         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
         self.socket.connect(SOCKET_SUB)
 
-    def check_for_update(self, timeout: float = 5) -> str | None:
+    def check_for_update(
+        self, timeout: float = 5
+    ) -> tuple[str, np.ndarray | None] | None:
         """Returns message or None if no update."""
         try:
             has_update, _, _ = zmq.select([self.socket], [], [], timeout)
 
             if has_update:
-                return self.socket.recv_string(flags=zmq.NOBLOCK)
-        except zmq.ZMQError:
+                parts = self.socket.recv_multipart(flags=zmq.NOBLOCK)
+                if len(parts) != 3 or parts[0] != self.topic.encode():
+                    return None
+                request_id = parts[1].decode("ascii")
+                if len(parts[2]) != 20 * 6 * 4:
+                    return request_id, None
+                output = np.frombuffer(parts[2], dtype=np.float32).reshape((20, 6))
+                return request_id, output if np.isfinite(output).all() else None
+        except (zmq.ZMQError, UnicodeDecodeError):
             pass
 
         return None

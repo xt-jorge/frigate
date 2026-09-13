@@ -503,13 +503,24 @@ class NorfairTracker(ObjectTracker):
             for id, obj in self.tracked_objects.items()
             if self.disappeared[id] == 0
         ]
-        self.match_and_update(frame_name, frame_time, detections=detections)
+        self.match_and_update(
+            frame_name,
+            frame_time,
+            detections=detections,
+            detector_observed_at=[
+                obj.get("detector_observed_at")
+                for id, obj in self.tracked_objects.items()
+                if self.disappeared[id] == 0
+            ],
+        )
 
     def match_and_update(
         self,
         frame_name: str,
         frame_time: float,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
+        *,
+        detector_observed_at: list[float | None] | None = None,
     ) -> None:
         # Group detections by object type
         detections_by_type: dict[str, list[Detection]] = {}
@@ -524,7 +535,7 @@ class NorfairTracker(ObjectTracker):
             )
             if yuv_frame is None:
                 return
-        for obj in detections:
+        for index, obj in enumerate(detections):
             label = obj[0]
             if label not in detections_by_type:
                 detections_by_type[label] = []
@@ -555,6 +566,11 @@ class NorfairTracker(ObjectTracker):
                     "ratio": obj[4],
                     "region": obj[5],
                     "frame_time": frame_time,
+                    "detector_observed_at": (
+                        detector_observed_at[index]
+                        if detector_observed_at is not None
+                        else None
+                    ),
                     "centroid": (centroid_x, centroid_y),
                 },
             )
