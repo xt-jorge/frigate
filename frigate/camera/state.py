@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import math
 import os
 import threading
 from collections import defaultdict
@@ -14,6 +15,7 @@ from frigate.config import (
     FrigateConfig,
     ZoomingModeEnum,
 )
+from frigate.config.camera.detect import VEHICLE_DETECTOR_LABELS
 from frigate.const import CLIPS_DIR, THUMB_DIR
 from frigate.ptz.autotrack import PtzAutoTrackerThread
 from frigate.track.tracked_object import TrackedObject
@@ -513,6 +515,23 @@ class CameraState:
             ):
                 publish_threshold = 1
 
+            detector_time = updated_obj.obj_data.get("detector_observed_at")
+            previous_detector_time = updated_obj.previous.get("detector_observed_at")
+            detector_update = (
+                self.camera_config.detect.vehicle_detector_updates
+                and obj_label in VEHICLE_DETECTOR_LABELS
+                and not updated_obj.false_positive
+                and isinstance(detector_time, (int, float))
+                and not isinstance(detector_time, bool)
+                and math.isfinite(detector_time)
+                and detector_time > 0
+                and detector_time == frame_time == updated_obj.obj_data["frame_time"]
+                and (
+                    previous_detector_time is None
+                    or detector_time > previous_detector_time
+                )
+                and frame_time >= updated_obj.last_published + 0.2
+            )
             if (
                 (
                     frame_time - updated_obj.last_published > publish_threshold
@@ -520,6 +539,7 @@ class CameraState:
                 )
                 or significant_update
                 or path_update
+                or detector_update
             ):
                 # call event handlers
                 for c in self.callbacks["update"]:

@@ -105,3 +105,10 @@ UUID and a bounded output snapshot. Late responses cannot satisfy a later
 request, and missing asynchronous outputs produce no detections. The five-second
 response deadline is not extended by unrelated responses. Input locks are
 released before inference; one fixed input buffer is retained per camera.
+
+Selected cameras can enable
+[vehicle detector updates](/configuration/stationary_objects#selected-camera-vehicle-detector-updates)
+to redetect stopped vehicles on each processed detect frame and publish genuine
+advancing detector measurements at up to 5 Hz per object. The default remains
+disabled. This cadence never renews a prediction's detector clock and does not
+guarantee that inference or delivery meets a consumer's freshness deadline.

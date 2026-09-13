@@ -14,6 +14,7 @@ from frigate.camera import CameraMetrics, PTZMetrics
 from frigate.comms.inter_process import InterProcessRequestor
 from frigate.config import CameraConfig, DetectConfig, LoggerConfig, ModelConfig
 from frigate.config.camera.camera import CameraTypeEnum
+from frigate.config.camera.detect import VEHICLE_DETECTOR_LABELS
 from frigate.config.camera.updater import (
     CameraConfigUpdateEnum,
     CameraConfigUpdateSubscriber,
@@ -324,7 +325,11 @@ def process_frames(
                     obj["id"]
                     for obj in object_tracker.tracked_objects.values()
                     # if it has exceeded the stationary threshold
-                    if obj["motionless_count"]
+                    if not (
+                        camera_config.detect.vehicle_detector_updates
+                        and obj["label"] in VEHICLE_DETECTOR_LABELS
+                    )
+                    and obj["motionless_count"]
                     >= camera_config.detect.stationary.threshold
                     # and it hasn't disappeared
                     and object_tracker.disappeared[obj["id"]] == 0

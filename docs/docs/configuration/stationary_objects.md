@@ -8,7 +8,7 @@ An object is considered stationary when it is being tracked and has been in a ve
 
 ## Why does it matter if an object is stationary?
 
-Once an object becomes stationary, object detection will not be continually run on that object. This serves to reduce resource usage and redundant detections when there has been no motion near the tracked object. This also means that Frigate is contextually aware, and can for example [filter out recording segments](record.md#configuring-recording-retention) to only when the object is considered active. Motion alone does not determine if an object is "active" for active_objects segment retention. Lighting changes for a parked car won't make an object active.
+By default, once an object becomes stationary, object detection will not be continually run on that object. This serves to reduce resource usage and redundant detections when there has been no motion near the tracked object. This also means that Frigate is contextually aware, and can for example [filter out recording segments](record.md#configuring-recording-retention) to only when the object is considered active. Motion alone does not determine if an object is "active" for active_objects segment retention. Lighting changes for a parked car won't make an object active.
 
 ## Tuning stationary behavior
 
@@ -62,3 +62,34 @@ Now you have to determine which of the bounding boxes in this frame should be ma
 Now let's assume that those other 3 cars were already being tracked as stationary objects, so the car driving down the street is a new 4th car. The object tracker knows we have had 3 cars and we now have 4. As the new car approaches the parked cars, the bounding boxes for all 4 cars is predicted based on the previous frames. The predicted boxes for the parked cars is pretty much a 100% overlap with the bounding boxes in the new frame. The parked cars are slam dunk matches to the tracking ids they had before and the only one left is the remaining bounding box which gets assigned to the new car. This results in a much lower error rate. Not perfect, but better.
 
 The most difficult scenario that causes IDs to be assigned incorrectly is when an object completely occludes another object. When a car drives in front of another car and its no longer visible, a bounding box disappeared and it's a bit of a toss up when assigning the id since it's difficult to know which one is in front of the other. This happens for cars passing in front of other cars fairly often. It's something that we want to improve in the future.
+
+## Selected-camera vehicle detector updates
+
+Set `detect.vehicle_detector_updates: true` on a camera that needs continuing
+vehicle measurements while a vehicle is stopped. This optional setting defaults
+to `false` and requires `detect.fps` of at least 5; it does not change the FPS.
+
+```yaml
+cameras:
+  passage:
+    detect:
+      fps: 15
+      vehicle_detector_updates: true
+```
+
+For this camera, tracked `car`, `truck`, `bus`, and `motorcycle` objects are
+redetected on each processed detect frame instead of reused as stationary seeds.
+Their stationary classification and existing confidence thresholds are unchanged.
+Other labels and cameras retain their existing stationary behavior.
+
+Genuine advancing detector measurements can also trigger ordinary tracked-object
+MQTT updates at up to 5 Hz per object. These additional updates require a
+true-positive vehicle and a detector clock matching both the current camera
+frame and the object's box frame. Predictions, missing results, and retained
+measurements do not generate a detector heartbeat. Existing event triggers still
+apply independently.
+
+This costs additional inference work. Configured FPS and the 200 ms publication
+interval are not a processing-latency guarantee. Consumers must enforce their
+own maximum observation gap and stop trusting continuity when detections stall.
+This setting does not establish full vehicle visibility or safe gate clearance.
