@@ -48,6 +48,13 @@ def occupancy_frame(
     detections: list[Detection],
 ) -> dict[str, Any]:
     """Freeze raw current detector results, including positively observed emptiness."""
+    # Detector crops can include padding beyond the frame; only image pixels
+    # within a successfully inferred crop establish occupancy coverage.
+    image_coverage = []
+    for x1, y1, x2, y2 in coverage:
+        clipped = (max(0, x1), max(0, y1), min(shape[1], x2), min(shape[0], y2))
+        if clipped[0] < clipped[2] and clipped[1] < clipped[3]:
+            image_coverage.append(clipped)
     return {
         "camera": camera,
         "frame_time": frame_time,
@@ -56,8 +63,10 @@ def occupancy_frame(
         "complete": bool(bounds)
         and isfinite(frame_time)
         and frame_time > 0
-        and all(any(contains(region, box) for region in coverage) for box in bounds),
-        "coverage": [list(region) for region in coverage],
+        and all(
+            any(contains(region, box) for region in image_coverage) for box in bounds
+        ),
+        "coverage": [list(region) for region in image_coverage],
         "objects": [
             {
                 "label": detection[0],
