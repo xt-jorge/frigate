@@ -188,13 +188,25 @@ class TestCurrentLprScheduling(unittest.TestCase):
             {"label": "person"},
             {"box": [-1, 1, 20, 20]},
             {"position_changes": 0},
-            {"stationary": True, "motionless_count": 226},
         ]:
             with self.subTest(replacement=replacement):
                 value = packet()
                 value[3][0].update(replacement)
                 self.run_packet(value)
         self.processor.process_frame.assert_not_called()
+
+    def test_stationary_ocr_keeps_refreshing_at_two_second_cadence(self):
+        for index in range(21):
+            self.tick = index * 0.5
+            self.now = 1000 + self.tick
+            value = packet(frame_time=self.now)
+            value[3][0].update(stationary=True, motionless_count=300 + index)
+            self.run_packet(value)
+        samples = [
+            call.kwargs["source_frame_time"]
+            for call in self.processor.process_frame.call_args_list
+        ]
+        self.assertEqual(samples, [1000, 1002, 1004, 1006, 1008, 1010])
 
 
 class TestLprSamplePair(unittest.TestCase):
@@ -316,6 +328,15 @@ class TestLprSamplePair(unittest.TestCase):
                     self.obj, self.frame, source_frame_time=clock
                 )
         self.processor._process_license_plate.assert_not_called()
+
+    def test_stationary_mixin_does_not_discard_scheduled_fresh_ocr(self):
+        self.obj.update(stationary=True, motionless_count=10000)
+        self.sample("ABC123", 0.95, 100)
+        self.sample("ABC123", 0.95, 102)
+        self.assertEqual(self.processor._process_license_plate.call_count, 2)
+        self.assertEqual(
+            self.processor.sub_label_publisher.publish.call_args.args[0][4], 102
+        )
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ class TestOccupancyCoverage(unittest.TestCase):
                     [(0, 367, 704, 525)],
                     [(0, 0, 796, 796)],
                     detections,
+                    [],
+                    [],
                 )
                 self.assertEqual(frame["coverage"], [[0, 0, 704, 576]])
                 self.assertTrue(frame["complete"])
@@ -33,6 +35,8 @@ class TestOccupancyCoverage(unittest.TestCase):
             [(0, 367, 704, 525)],
             [(-40, -40, 796, 400), (704, 0, 796, 796), (0, 576, 796, 796)],
             [],
+            [],
+            [],
         )
         self.assertEqual(frame["coverage"], [[0, 0, 704, 400]])
         self.assertFalse(frame["complete"])
@@ -45,6 +49,8 @@ class TestOccupancyCoverage(unittest.TestCase):
             (576, 704),
             [(0, 367, 704, 700)],
             [(0, 0, 796, 796)],
+            [],
+            [],
             [],
         )
         self.assertFalse(frame["complete"])

@@ -64,8 +64,8 @@ class TestRecognizedPlatePublication(unittest.TestCase):
         event_get.start()
         self.addCleanup(event_get.stop)
 
-    def next_frame(self) -> None:
-        self.frame_time += 1
+    def next_frame(self, step: float = 1) -> None:
+        self.frame_time += step
         detection = {
             "id": EVENT_ID,
             "label": "car",
@@ -96,7 +96,9 @@ class TestRecognizedPlatePublication(unittest.TestCase):
         self.assertTrue(obj.is_stationary())
         self.processor.dispatcher.reset_mock()
         self.next_frame()
-        self.processor.dispatcher.publish.assert_not_called()
+        if not obj.false_positive:
+            self.processor.dispatcher.publish.assert_called_once()
+        self.processor.dispatcher.reset_mock()
 
     def set_plate(self, value: str | None, score: float | None) -> None:
         self.processor.set_object_attribute(
@@ -127,8 +129,8 @@ class TestRecognizedPlatePublication(unittest.TestCase):
         self.assertTrue(event["after"]["stationary"])
 
         self.set_plate("TEST123", 0.9)
-        self.next_frame()
-        self.next_frame()
+        self.next_frame(0.1)
+        self.next_frame(0.1)
         self.processor.dispatcher.publish.assert_called_once()
 
     def test_changed_score_plate_and_clear_each_publish_once(self) -> None:
@@ -145,7 +147,7 @@ class TestRecognizedPlatePublication(unittest.TestCase):
                 self.assertEqual(
                     event["after"]["recognized_license_plate"], [value, score]
                 )
-                self.next_frame()
+                self.next_frame(0.1)
                 self.processor.dispatcher.publish.assert_called_once()
 
     def test_plate_update_does_not_publish_false_positive(self) -> None:

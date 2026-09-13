@@ -27,6 +27,32 @@ Use of a GPU or AI accelerator is highly recommended. AI accelerators will outpe
 - Re-streaming via RTSP to reduce the number of connections to your camera
 - WebRTC & MSE support for low-latency live view
 
+## Sentinel source integration
+
+This fork publishes `occupancy_frames` for existing configured `detect.occupancy_zones`.
+Each frame includes its original capture time, dimensions, inference coverage clipped
+to image pixels, current raw detections, and the existing native tracker inventory.
+The `regions` entries carry the existing zone name, contour bounds, and continuity
+uncertainty; the consumer requires the commissioned zone name and geometry together.
+
+Normal stationary tracker seeds retain their original detector clocks. After a
+confirmed overlapping track disappears, the existing stationary-motion classifier
+checks its occupied image footprint. Whole-box overlap follows the existing contour,
+and persisting sub-patches keep uncertainty during partial occlusion. Changed occupied
+pixels plus current complete negative inference can recover without a full vehicle
+trajectory. Rejected candidates use the configured native disappearance budget;
+incomplete coverage or replayed frames cannot turn their absence into fresh clearance.
+Contained footprints coalesce across reacquisition. The 64-footprint resource limit
+logs saturation and keeps the affected zone unknown until source or calibration recovery.
+
+Current non-false-positive tracks publish through the existing `events` channel at a
+bounded 0.5-second heartbeat, including cameras without occupancy zones. Coasting
+old-frame geometry does not trigger presence updates, and heartbeat publication does
+not refresh detector or OCR capture times. The current-frame LPR scheduler continues
+real OCR for stationary vehicles at most once per track every two seconds, inside its
+existing camera/global attempt budgets. Both former five-second stationary cutoffs
+are removed; cached plate text never becomes a new OCR capture.
+
 ## Documentation
 
 View the documentation at https://docs.frigate.video

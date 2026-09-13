@@ -49,7 +49,12 @@ from frigate.util.object import (
 )
 from frigate.util.process import FrigateProcess
 from frigate.util.time import get_tomorrow_at_time
-from frigate.video.occupancy import contains, occupancy_frame, zone_bounds
+from frigate.video.occupancy import (
+    OccupancyContinuity,
+    contains,
+    occupancy_frame,
+    zone_bounds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +213,9 @@ def process_frames(
 
     startup_scan = True
     stationary_frame_counter = 0
+    occupancy_continuity = OccupancyContinuity(
+        camera_config.detect.max_disappeared / camera_config.detect.fps
+    )
     last_occupancy_frame = float("-inf")
     camera_enabled = True
 
@@ -419,17 +427,6 @@ def process_frames(
                             get_cluster_region(frame_shape, region_min_size, [0], [box])
                         )
 
-            if occupancy_due and bounds and occupancy_stable:
-                # Do not let a reused stationary tuple win reduction over its
-                # newly measured box and hide the original detector clock.
-                stationary_object_ids = [
-                    obj_id
-                    for obj_id in stationary_object_ids
-                    if not intersects_any(
-                        object_tracker.tracked_objects[obj_id]["box"], regions
-                    )
-                ]
-
             # resize regions and detect
             # seed with stationary objects
             detections = [
@@ -499,13 +496,30 @@ def process_frames(
             if not camera_config.detect.enabled or not occupancy_stable:
                 coverage = []
                 observed_detections = []
+            occupancy_detections = reduce_detections(frame_shape, observed_detections)
+            occupancy_tracks = object_tracker.occupancy_tracks()
             occupancy = occupancy_frame(
                 camera_config.name,
                 frame_time,
                 frame_shape,
                 bounds,
                 coverage,
-                reduce_detections(frame_shape, observed_detections),
+                occupancy_detections,
+                occupancy_tracks,
+                [],
+            )
+            occupancy["regions"] = occupancy_continuity.observe(
+                frame,
+                frame_time,
+                {
+                    name: camera_config.zones[name].contour
+                    for name in camera_config.detect.occupancy_zones
+                }
+                if bounds
+                else {},
+                occupancy_detections,
+                occupancy_tracks,
+                occupancy["complete"],
             )
             last_occupancy_frame = frame_time
 

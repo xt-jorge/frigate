@@ -73,7 +73,7 @@ class TestDetectorObservationTime(unittest.TestCase):
     def test_pipeline_keeps_stationary_seed_clock_with_new_detector_result(self):
         self.run_stationary_pipeline()
 
-    def test_occupancy_scan_replaces_stationary_seed_with_original_detector_clock(self):
+    def test_occupancy_scan_preserves_stationary_seed_through_detector_miss(self):
         self.run_stationary_pipeline(True)
 
     def run_stationary_pipeline(self, occupancy=False):
@@ -103,7 +103,7 @@ class TestDetectorObservationTime(unittest.TestCase):
             ),
             patch(
                 "frigate.video.detect.detect",
-                return_value=[self.detection] if occupancy else [fresh],
+                return_value=[] if occupancy else [fresh],
             ),
         ):
             subscriber.return_value.check_for_updates.return_value = []
@@ -124,13 +124,58 @@ class TestDetectorObservationTime(unittest.TestCase):
                 [],
                 exit_on_empty=True,
             )
+        if occupancy:
+            self.assertEqual(self.tracker.disappeared[old["id"]], 0)
         published = output.get_nowait()[3]
         clocks = {
             tuple(obj["box"]): obj["detector_observed_at"] for obj in published.values()
         }
         self.assertEqual(
             clocks,
-            {self.detection[2]: 101.0}
+            {self.detection[2]: 100.0}
             if occupancy
             else {self.detection[2]: 100.0, fresh[2]: 101.0},
         )
+
+
+class TestOccupancyNativeTracks(unittest.TestCase):
+    setUp = TestDetectorObservationTime.setUp
+    observe = TestDetectorObservationTime.observe
+
+    def test_tentative_track_keeps_its_occupancy_identity_after_initialization(self):
+        self.tracker.default_tracker["static"].initialization_delay = 3
+        self.tracker.trackers["car"]["static"].initialization_delay = 3
+        self.tracker.match_and_update(
+            "fixture", 100.0, [self.detection], detector_observed_at=[100.0]
+        )
+        first = self.tracker.occupancy_tracks()[0]
+        self.assertEqual(self.tracker.tracked_objects, {})
+        for tick in range(1, 8):
+            self.tracker.match_and_update(
+                "fixture",
+                100 + tick,
+                [self.detection],
+                detector_observed_at=[100 + tick],
+            )
+        initialized = self.tracker.occupancy_tracks()[0]
+        self.assertEqual(first["id"], initialized["id"])
+        self.assertEqual(initialized["detector_observed_at"], 107)
+        self.assertEqual(len(self.tracker.tracked_objects), 1)
+
+    def test_coasting_never_advances_measured_box_or_detector_clock(self):
+        self.observe(100, 100)
+        before = self.tracker.occupancy_tracks()
+        self.tracker.match_and_update("fixture", 101, [])
+        after = self.tracker.occupancy_tracks()
+        self.assertEqual(before, after)
+        self.assertEqual(after[0]["frame_time"], 100)
+
+    def test_new_tracker_life_cannot_reuse_an_old_occupancy_identity(self):
+        self.observe(100, 100)
+        original = self.tracker.occupancy_tracks()[0]["id"]
+        other = NorfairTracker(self.tracker.camera_config, self.tracker.ptz_metrics)
+        other.frame_manager = MagicMock()
+        other.match_and_update(
+            "fixture", 101, [self.detection], detector_observed_at=[101]
+        )
+        self.assertNotEqual(original, other.occupancy_tracks()[0]["id"])

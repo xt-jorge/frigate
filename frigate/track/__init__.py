@@ -19,3 +19,8 @@ class ObjectTracker(ABC):
         detector_observed_at: list[float | None] | None = None,
     ) -> None:
         pass
+
+    @abstractmethod
+    def occupancy_tracks(self) -> list[dict[str, Any]]:
+        """Return measured geometry for the tracker's existing object lives."""
+        pass

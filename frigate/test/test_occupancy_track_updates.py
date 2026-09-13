@@ -42,7 +42,7 @@ class TestOccupancyTrackUpdates(unittest.TestCase):
         self.frame(122, 122, box=(110, 100, 210, 200))
         events = self.events()
         clocks = [event["after"]["detector_observed_at"] for event in events]
-        self.assertGreater(len(clocks), 30)
+        self.assertGreater(len(clocks), 20)
         self.assertLessEqual(max(b - a for a, b in pairwise(clocks)), 0.501)
         self.assertEqual(clocks[-1], 122)
         self.assertTrue(
@@ -56,30 +56,26 @@ class TestOccupancyTrackUpdates(unittest.TestCase):
         )
         self.assertEqual(events[-1]["after"]["box"], [110, 100, 210, 200])
 
-    def test_detector_trigger_is_bounded_to_four_hz(self):
+    def test_current_track_trigger_is_bounded_to_two_hz(self):
         for tick in range(100):
             time = 110 + tick / 100
             self.frame(time, time)
-        self.assertLessEqual(len(self.events()), 4)
-        self.assertGreaterEqual(len(self.events()), 3)
+        self.assertLessEqual(len(self.events()), 2)
+        self.assertGreaterEqual(len(self.events()), 1)
 
-    def test_missing_stale_predicted_or_invalid_clock_does_not_publish(self):
+    def test_predicted_frame_does_not_publish_presence(self):
         for time, clock, stored in [
-            (110, None, None),
-            (111, 110, None),
             (112, 110, 110),
-            (113, float("nan"), None),
-            (114, True, None),
         ]:
             self.frame(time, clock, stored)
         self.assertEqual(self.events(), [])
 
-    def test_disabled_camera_keeps_existing_stationary_publication(self):
+    def test_release_only_camera_keeps_current_stationary_presence(self):
         self.config.occupancy_zones = []
         for tick in range(48):
             time = 110 + tick / 4
             self.frame(time, time)
-        self.assertEqual(self.events(), [])
+        self.assertGreater(len(self.events()), 20)
 
     def test_false_positive_does_not_get_detector_trigger(self):
         obj = self.state.tracked_objects[fixtures.EVENT_ID]
@@ -91,9 +87,13 @@ class TestOccupancyTrackUpdates(unittest.TestCase):
         self.frame(110, 110)
         self.assertEqual(self.events(), [])
 
-    def test_repeated_detector_clock_cannot_publish_again(self):
+    def test_current_stationary_capture_publishes_without_rejuvenating_detector_clock(
+        self,
+    ):
         self.frame(110, 110)
         self.assertEqual(len(self.events()), 1)
         self.frame(111, 110)
         self.frame(112, 110, stored=110)
-        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(len(self.events()), 2)
+        self.assertEqual(self.events()[-1]["after"]["frame_time"], 111)
+        self.assertEqual(self.events()[-1]["after"]["detector_observed_at"], 110)

@@ -25,6 +25,7 @@ class TestOccupancyFrames(unittest.TestCase):
             frames.put(("fixture", time))
         tracker = MagicMock()
         tracker.tracked_objects = {}
+        tracker.occupancy_tracks.return_value = []
         tracker.untracked_object_boxes = []
         detector = MagicMock()
         detector.last_detection_successful = success

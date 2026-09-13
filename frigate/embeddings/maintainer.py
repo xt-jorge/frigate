@@ -801,6 +801,12 @@ class EmbeddingMaintainer(threading.Thread):
                     obj
                     for obj in objects
                     if self._current_lpr_object(obj, camera, frame_time, processor)
+                    and (
+                        not obj.get("stationary")
+                        or monotonic_now
+                        - self._lpr_track_attempt.get((camera, obj["id"]), -math.inf)
+                        >= 2.0
+                    )
                 ]
                 if not candidates:
                     continue
@@ -854,12 +860,6 @@ class EmbeddingMaintainer(threading.Thread):
             or (
                 obj.get("position_changes", 0) == 0 and not obj.get("stationary", False)
             )
-        ):
-            return False
-        if obj.get("stationary") and (
-            (obj.get("motionless_count", 0) - camera_config.detect.stationary.threshold)
-            / camera_config.detect.fps
-            > processor.stationary_scan_duration
         ):
             return False
         box = obj.get("box")

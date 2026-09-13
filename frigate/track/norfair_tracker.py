@@ -2,6 +2,7 @@ import logging
 import random
 import string
 from typing import Any, Sequence, cast
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -130,6 +131,7 @@ class NorfairTracker(ObjectTracker):
         self.camera_name = config.name
         self.track_id_map: dict[str, str] = {}
         self.stationary_classifier = StationaryMotionClassifier()
+        self.occupancy_generation = uuid4().hex
 
         # Define tracker configurations for static camera
         self.object_type_configs = {
@@ -226,6 +228,34 @@ class NorfairTracker(ObjectTracker):
             self.ptz_motion_estimator = PtzMotionEstimator(
                 self.camera_config, self.ptz_metrics
             )
+
+    def occupancy_tracks(self) -> list[dict[str, Any]]:
+        """Snapshot native track lives, including candidates, without predicted geometry."""
+        tracks = []
+        groups = [
+            (f"{label}:{mode}", tracker)
+            for label, modes in self.trackers.items()
+            for mode, tracker in modes.items()
+        ] + [
+            (f"default:{mode}", tracker)
+            for mode, tracker in self.default_tracker.items()
+        ]
+        for group, tracker in groups:
+            for obj in tracker.tracked_objects:
+                if not obj.hit_counter_is_positive:
+                    continue
+                measured = obj.last_detection.data
+                tracks.append(
+                    {
+                        "id": f"{self.occupancy_generation}:{group}:{obj.initializing_id}",
+                        "label": measured["label"],
+                        "initialized": not obj.is_initializing,
+                        "box": list(measured["box"]),
+                        "frame_time": measured["frame_time"],
+                        "detector_observed_at": measured.get("detector_observed_at"),
+                    }
+                )
+        return tracks
 
     def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Tracker:
         """Helper function to create a tracker with given configuration."""
