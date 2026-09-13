@@ -1,16 +1,16 @@
 import datetime
+import fcntl
 import logging
 import queue
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import deque
 from multiprocessing import Queue, Value
 from multiprocessing.synchronize import Event as MpEvent
 from typing import Any, Optional
+from uuid import uuid4
 
 import numpy as np
-import zmq
 
 from frigate.comms.object_detector_signaler import (
     ObjectDetectorPublisher,
@@ -25,12 +25,44 @@ from frigate.detectors.detector_config import (
     ModelConfig,
 )
 from frigate.util.builtin import EventsPerSecond, load_labels
-from frigate.util.image import SharedMemoryFrameManager, UntrackedSharedMemory
+from frigate.util.image import UntrackedSharedMemory
 from frigate.util.process import FrigateProcess
 
 from .util import tensor_transform
 
 logger = logging.getLogger(__name__)
+
+
+DETECTOR_REQUEST_HEADER_SIZE = 16
+
+
+def read_detector_input(name: str, request_id: str, shape: tuple) -> np.ndarray | None:
+    """Copy only the queued generation while holding a fresh shared-memory lock."""
+    try:
+        shm = UntrackedSharedMemory(name=name, create=False)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fcntl.flock(shm._fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return None
+        try:
+            if bytes(shm.buf[:DETECTOR_REQUEST_HEADER_SIZE]).hex() != request_id:
+                return None
+            size = int(np.prod(shape))
+            if shm.size < DETECTOR_REQUEST_HEADER_SIZE + size:
+                return None
+            return np.ndarray(
+                shape,
+                dtype=np.uint8,
+                buffer=shm.buf,
+                offset=DETECTOR_REQUEST_HEADER_SIZE,
+            ).copy()
+        finally:
+            fcntl.flock(shm._fd, fcntl.LOCK_UN)
+    finally:
+        shm.close()
 
 
 class ObjectDetector(ABC):
@@ -129,30 +161,21 @@ class DetectorRunner(FrigateProcess):
         self.start_time = start_time
         self.config = config
         self.detector_config = detector_config
-        self.outputs: dict[str, Any] = {}
-
-    def create_output_shm(self, name: str) -> None:
-        out_shm = UntrackedSharedMemory(name=f"out-{name}", create=False)
-        out_np: np.ndarray = np.ndarray((20, 6), dtype=np.float32, buffer=out_shm.buf)
-        self.outputs[name] = {"shm": out_shm, "np": out_np}
 
     def run(self) -> None:
         self.pre_run_setup(self.config.logger)
 
-        frame_manager = SharedMemoryFrameManager()
         object_detector = LocalObjectDetector(detector_config=self.detector_config)
         detector_publisher = ObjectDetectorPublisher()
 
-        for name in self.cameras:
-            self.create_output_shm(name)
-
         while not self.stop_event.is_set():
             try:
-                connection_id = self.detection_queue.get(timeout=1)
+                connection_id, request_id = self.detection_queue.get(timeout=1)
             except queue.Empty:
                 continue
-            input_frame = frame_manager.get(
+            input_frame = read_detector_input(
                 connection_id,
+                request_id,
                 (
                     1,
                     self.detector_config.model.height,  # type: ignore[union-attr]
@@ -162,7 +185,7 @@ class DetectorRunner(FrigateProcess):
             )
 
             if input_frame is None:
-                logger.warning(f"Failed to get frame {connection_id} from SHM")
+                detector_publisher.publish(connection_id, request_id, None)
                 continue
 
             # detect and send the output
@@ -170,13 +193,7 @@ class DetectorRunner(FrigateProcess):
             mono_start = time.monotonic()
             detections = object_detector.detect_raw(input_frame)
             duration = time.monotonic() - mono_start
-            frame_manager.close(connection_id)
-
-            if connection_id not in self.outputs:
-                self.create_output_shm(connection_id)
-
-            self.outputs[connection_id]["np"][:] = detections[:]
-            detector_publisher.publish(connection_id)
+            detector_publisher.publish(connection_id, request_id, detections)
             self.start_time.value = 0.0
 
             self.avg_speed.value = (self.avg_speed.value * 9 + duration) / 10
@@ -204,28 +221,22 @@ class AsyncDetectorRunner(FrigateProcess):
         self.start_time = start_time
         self.config = config
         self.detector_config = detector_config
-        self.outputs: dict[str, Any] = {}
-        self._frame_manager: SharedMemoryFrameManager | None = None
         self._publisher: ObjectDetectorPublisher | None = None
         self._detector: AsyncLocalObjectDetector | None = None
-        self.send_times: deque[float] = deque()
-
-    def create_output_shm(self, name: str) -> None:
-        out_shm = UntrackedSharedMemory(name=f"out-{name}", create=False)
-        out_np: np.ndarray = np.ndarray((20, 6), dtype=np.float32, buffer=out_shm.buf)
-        self.outputs[name] = {"shm": out_shm, "np": out_np}
+        self.pending: dict[str, tuple[str, float]] = {}
+        self.pending_lock = threading.Lock()
 
     def _detect_worker(self) -> None:
         logger.info("Starting Detect Worker Thread")
         while not self.stop_event.is_set():
             try:
-                connection_id = self.detection_queue.get(timeout=1)
+                connection_id, request_id = self.detection_queue.get(timeout=1)
             except queue.Empty:
                 continue
 
-            assert self._frame_manager is not None
-            input_frame = self._frame_manager.get(
+            input_frame = read_detector_input(
                 connection_id,
+                request_id,
                 (
                     1,
                     self.detector_config.model.height,  # type: ignore[union-attr]
@@ -235,42 +246,39 @@ class AsyncDetectorRunner(FrigateProcess):
             )
 
             if input_frame is None:
-                logger.warning(f"Failed to get frame {connection_id} from SHM")
                 continue
 
             # mark start time and send to accelerator
-            self.send_times.append(time.perf_counter())
+            with self.pending_lock:
+                self.pending[connection_id] = (request_id, time.perf_counter())
             assert self._detector is not None
-            self._detector.async_send_input(input_frame, connection_id)
+            self._detector.async_send_input(input_frame, request_id)
 
     def _result_worker(self) -> None:
         logger.info("Starting Result Worker Thread")
         while not self.stop_event.is_set():
             assert self._detector is not None
-            connection_id, detections = self._detector.async_receive_output()
+            request_id, detections = self._detector.async_receive_output()
 
             # Handle timeout case (queue.Empty) - just continue
-            if connection_id is None:
+            if request_id is None:
                 continue
 
-            if not self.send_times:
-                # guard; shouldn't happen if send/recv are balanced
-                continue
-            ts = self.send_times.popleft()
+            with self.pending_lock:
+                connection_id = next(
+                    (
+                        camera
+                        for camera, (generation, _) in self.pending.items()
+                        if generation == request_id
+                    ),
+                    None,
+                )
+                if connection_id is None:
+                    continue
+                _, ts = self.pending.pop(connection_id)
             duration = time.perf_counter() - ts
-
-            # release input buffer
-            assert self._frame_manager is not None
-            self._frame_manager.close(connection_id)
-
-            if connection_id not in self.outputs:
-                self.create_output_shm(connection_id)
-
-            # write results and publish
-            if detections is not None:
-                self.outputs[connection_id]["np"][:] = detections[:]
             assert self._publisher is not None
-            self._publisher.publish(connection_id)
+            self._publisher.publish(connection_id, request_id, detections)
 
             # update timers
             self.avg_speed.value = (self.avg_speed.value * 9 + duration) / 10
@@ -279,14 +287,10 @@ class AsyncDetectorRunner(FrigateProcess):
     def run(self) -> None:
         self.pre_run_setup(self.config.logger)
 
-        self._frame_manager = SharedMemoryFrameManager()
         self._publisher = ObjectDetectorPublisher()
         self._detector = AsyncLocalObjectDetector(
             detector_config=self.detector_config, stop_event=self.stop_event
         )
-
-        for name in self.cameras:
-            self.create_output_shm(name)
 
         t_detect = threading.Thread(target=self._detect_worker, daemon=False)
         t_result = threading.Thread(target=self._result_worker, daemon=False)
@@ -397,16 +401,7 @@ class RemoteObjectDetector:
         self.fps = EventsPerSecond()
         self.detection_queue = detection_queue
         self.stop_event = stop_event
-        self.shm = UntrackedSharedMemory(name=self.name, create=False)
-        self.np_shm: np.ndarray = np.ndarray(
-            (1, model_config.height, model_config.width, 3),
-            dtype=np.uint8,
-            buffer=self.shm.buf,
-        )
-        self.out_shm = UntrackedSharedMemory(name=f"out-{self.name}", create=False)
-        self.out_np_shm: np.ndarray = np.ndarray(
-            (20, 6), dtype=np.float32, buffer=self.out_shm.buf
-        )
+        self.input_shape = (1, model_config.height, model_config.width, 3)
         self.detector_subscriber = ObjectDetectorSubscriber(name)
 
     def detect(self, tensor_input: np.ndarray, threshold: float = 0.4) -> list:
@@ -415,27 +410,54 @@ class RemoteObjectDetector:
         if self.stop_event.is_set():
             return detections
 
-        # Drain any stale detection results from the ZMQ buffer before making a new request
-        # This prevents reading detection results from a previous request
-        # NOTE: This should never happen, but can in some rare cases
-        while True:
+        request_id = uuid4().hex
+        shm = UntrackedSharedMemory(name=self.name, create=False)
+        try:
             try:
-                self.detector_subscriber.socket.recv_string(flags=zmq.NOBLOCK)
-            except zmq.Again:
-                break
-
-        # copy input to shared memory
-        self.np_shm[:] = tensor_input[:]
-        self.detection_queue.put(self.name)
-        result = self.detector_subscriber.check_for_update()
-
-        # if it timed out
-        if result is None:
+                fcntl.flock(shm._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return detections
+            try:
+                if shm.size < DETECTOR_REQUEST_HEADER_SIZE + tensor_input.nbytes:
+                    return detections
+                shm.buf[:DETECTOR_REQUEST_HEADER_SIZE] = bytes(
+                    DETECTOR_REQUEST_HEADER_SIZE
+                )
+                target = np.ndarray(
+                    self.input_shape,
+                    dtype=np.uint8,
+                    buffer=shm.buf,
+                    offset=DETECTOR_REQUEST_HEADER_SIZE,
+                )
+                target[:] = tensor_input[:]
+                shm.buf[:DETECTOR_REQUEST_HEADER_SIZE] = bytes.fromhex(request_id)
+            finally:
+                fcntl.flock(shm._fd, fcntl.LOCK_UN)
+        finally:
+            shm.close()
+        self.detection_queue.put((self.name, request_id))
+        deadline = time.monotonic() + 5
+        while not self.stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return detections
+            result = self.detector_subscriber.check_for_update(timeout=remaining)
+            if result is None:
+                return detections
+            result_id, raw_detections = result
+            if result_id != request_id:
+                continue
+            if raw_detections is None:
+                return detections
+            break
+        else:
             return detections
 
-        for d in self.out_np_shm:
+        for d in raw_detections:
             if d[1] < threshold:
                 break
+            if d[0] != int(d[0]) or int(d[0]) not in self.labels:
+                return []
             detections.append(
                 (self.labels[int(d[0])], float(d[1]), (d[2], d[3], d[4], d[5]))
             )
@@ -444,5 +466,3 @@ class RemoteObjectDetector:
 
     def cleanup(self) -> None:
         self.detector_subscriber.stop()
-        self.shm.unlink()
-        self.out_shm.unlink()

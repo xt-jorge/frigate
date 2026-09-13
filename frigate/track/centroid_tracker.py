@@ -142,10 +142,12 @@ class CentroidTracker(ObjectTracker):
         frame_name: str,
         frame_time: float,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
+        *,
+        detector_observed_at: list[float | None] | None = None,
     ) -> None:
         # group by name
         detection_groups = defaultdict(lambda: [])
-        for det in detections:
+        for index, det in enumerate(detections):
             detection_groups[det[0]].append(
                 {
                     "label": det[0],
@@ -155,6 +157,11 @@ class CentroidTracker(ObjectTracker):
                     "ratio": det[4],
                     "region": det[5],
                     "frame_time": frame_time,
+                    "detector_observed_at": (
+                        detector_observed_at[index]
+                        if detector_observed_at is not None
+                        else None
+                    ),
                 }
             )
 

@@ -16,6 +16,7 @@ from frigate.config.camera.updater import (
 )
 from frigate.const import REPLAY_CAMERA_PREFIX
 from frigate.models import Regions
+from frigate.object_detection.base import DETECTOR_REQUEST_HEADER_SIZE
 from frigate.util.builtin import empty_and_close_queue
 from frigate.util.image import SharedMemoryFrameManager, UntrackedSharedMemory
 from frigate.util.object import get_camera_regions_grid
@@ -133,14 +134,21 @@ class CameraMaintainer(threading.Thread):
                         for det in self.config.detectors.values()
                     ]
                 )
-                UntrackedSharedMemory(name=f"out-{name}", create=True, size=20 * 6 * 4)
                 UntrackedSharedMemory(
                     name=name,
                     create=True,
-                    size=largest_frame,
+                    size=largest_frame + DETECTOR_REQUEST_HEADER_SIZE,
                 )
             except FileExistsError:
-                pass
+                shm = UntrackedSharedMemory(name=name)
+                if shm.size < largest_frame + DETECTOR_REQUEST_HEADER_SIZE:
+                    shm.unlink()
+                    UntrackedSharedMemory(
+                        name=name,
+                        create=True,
+                        size=largest_frame + DETECTOR_REQUEST_HEADER_SIZE,
+                    ).close()
+                shm.close()
 
         camera_process = CameraTracker(
             config,

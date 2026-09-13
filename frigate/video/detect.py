@@ -412,18 +412,32 @@ def process_frames(
                 if obj["id"] in stationary_object_ids
             ]
 
-            for region in regions:
-                detections.extend(
-                    detect(
-                        camera_config.detect,
-                        object_detector,
-                        frame,
-                        model_config,
-                        region,
-                        camera_config.objects.track,
-                        camera_config.objects.filters,
-                    )
+            # Reduction retains selected tuple objects, so provenance follows the
+            # exact winning box, including reused stationary detections.
+            detector_times = {
+                id(detection): obj.get("detector_observed_at")
+                for detection, obj in zip(
+                    detections,
+                    (
+                        obj
+                        for obj in object_tracker.tracked_objects.values()
+                        if obj["id"] in stationary_object_ids
+                    ),
                 )
+            }
+            for region in regions:
+                observed = detect(
+                    camera_config.detect,
+                    object_detector,
+                    frame,
+                    model_config,
+                    region,
+                    camera_config.objects.track,
+                    camera_config.objects.filters,
+                )
+                for detection in observed:
+                    detector_times[id(detection)] = frame_time
+                detections.extend(observed)
 
             consolidated_detections = reduce_detections(frame_shape, detections)
 
@@ -434,7 +448,12 @@ def process_frames(
                 ]
                 # now that we have refined our detections, we need to track objects
                 object_tracker.match_and_update(
-                    frame_name, frame_time, tracked_detections
+                    frame_name,
+                    frame_time,
+                    tracked_detections,
+                    detector_observed_at=[
+                        detector_times[id(d)] for d in tracked_detections
+                    ],
                 )
             # else, just update the frame times for the stationary objects
             else:

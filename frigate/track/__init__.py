@@ -15,5 +15,7 @@ class ObjectTracker(ABC):
         frame_name: str,
         frame_time: float,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
+        *,
+        detector_observed_at: list[float | None] | None = None,
     ) -> None:
         pass
