@@ -35,6 +35,13 @@ to image pixels, current raw detections, and the existing native tracker invento
 The `regions` entries carry the existing zone name, contour bounds, and continuity
 uncertainty; the consumer requires the commissioned zone name and geometry together.
 
+The single-output YOLO decoder retains candidates above 0.1 within its existing
+20-result limit. Ordinary detections keep the existing 0.4 cutoff and camera filters.
+Candidates from the camera's tracked classes also inform region uncertainty before
+those filters; weak candidates do not create tracks, OCR reads, or ordinary published
+objects. They use the same inference and existing candidate-disappearance budget.
+A candidate already covered by a confirmed track adds no separate departure delay.
+
 Normal stationary tracker seeds retain their original detector clocks. After a
 confirmed overlapping track disappears, the existing stationary-motion classifier
 checks its occupied image footprint. Whole-box overlap follows the existing contour,

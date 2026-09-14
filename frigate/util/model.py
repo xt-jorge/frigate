@@ -12,6 +12,8 @@ from frigate.const import MODEL_CACHE_DIR
 
 logger = logging.getLogger(__name__)
 
+OCCUPANCY_CANDIDATE_MIN_SCORE = 0.1
+
 
 ### Post Processing
 
@@ -192,8 +194,14 @@ def __post_process_nms_yolo(predictions: np.ndarray, width, height) -> np.ndarra
         predictions = predictions.T
 
     scores = np.max(predictions[:, 4:], axis=1)
-    predictions = predictions[scores > 0.4, :]
-    scores = scores[scores > 0.4]
+    # Keep bounded ambiguity from the same inference. Ordinary detector callers
+    # still apply their existing 0.4 threshold before camera object filters.
+    # Exactly 0.4 remains excluded by the original strict decoder boundary.
+    selected = (scores > 0.4) | (
+        (scores > OCCUPANCY_CANDIDATE_MIN_SCORE) & (scores < 0.4)
+    )
+    predictions = predictions[selected, :]
+    scores = scores[selected]
     class_ids = np.argmax(predictions[:, 4:], axis=1)
 
     # Rescale box
@@ -206,7 +214,12 @@ def __post_process_nms_yolo(predictions: np.ndarray, width, height) -> np.ndarra
     boxes = boxes_xyxy
 
     # run NMS
-    indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.4, nms_threshold=0.4)
+    indices = cv2.dnn.NMSBoxes(
+        boxes,
+        scores,
+        score_threshold=OCCUPANCY_CANDIDATE_MIN_SCORE,
+        nms_threshold=0.4,
+    )
     detections = np.zeros((20, 6), np.float32)
     for i, (bbox, confidence, class_id) in enumerate(
         zip(boxes[indices], scores[indices], class_ids[indices])

@@ -67,6 +67,29 @@ class TestOccupancyContinuity(unittest.TestCase):
         self.assertIn(False, values)
         self.assertFalse(values[-1])
 
+    def test_weak_candidate_covered_by_confirmed_track_adds_no_departure_grace(self):
+        weak = ("car", 0.2, (35, 45, 85, 95), 2500, 1, self.region)
+        self.observe(100, [self.track], [weak])
+        self.assertEqual(self.owner.raw_pending["zone"], {})
+        empty = self.frame.copy()
+        empty[40:100, 30:90] = np.random.default_rng(8).integers(
+            30, 210, (60, 60), dtype=np.uint8
+        )
+        values = [self.observe(100 + tick / 4, frame=empty) for tick in range(1, 5)]
+        self.assertIn(False, values)
+        self.assertEqual(self.owner.raw_pending["zone"], {})
+
+    def test_separate_weak_follower_keeps_its_grace_when_confirmed_car_departs(self):
+        follower = ("car", 0.2, (5, 45, 25, 95), 1000, 0.4, self.region)
+        self.observe(100, [self.track], [follower])
+        empty = self.frame.copy()
+        empty[40:100, 30:90] = np.random.default_rng(8).integers(
+            30, 210, (60, 60), dtype=np.uint8
+        )
+        for tick in range(1, 20):
+            self.assertTrue(self.observe(100 + tick / 4, frame=empty))
+        self.assertFalse(self.observe(105, frame=empty))
+
     def test_new_generation_or_a_second_departing_car_cannot_remove_unchanged_footprint(
         self,
     ):

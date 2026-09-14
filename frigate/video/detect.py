@@ -35,6 +35,7 @@ from frigate.util.image import (
     SharedMemoryFrameManager,
     draw_box_with_label,
 )
+from frigate.util.model import OCCUPANCY_CANDIDATE_MIN_SCORE
 from frigate.util.object import (
     create_tensor_input,
     get_cluster_candidates,
@@ -150,11 +151,18 @@ def detect(
     region,
     objects_to_track,
     object_filters,
+    occupancy_candidates: list[tuple[Any, ...]] | None = None,
 ):
+    """Return ordinary detections and optionally collect same-inference candidates."""
     tensor_input = create_tensor_input(frame, model_config, region)
 
     detections = []
-    region_detections = object_detector.detect(tensor_input)
+    region_detections = object_detector.detect(
+        tensor_input,
+        threshold=OCCUPANCY_CANDIDATE_MIN_SCORE
+        if occupancy_candidates is not None
+        else 0.4,
+    )
     for d in region_detections:
         box = d[2]
         size = region[2] - region[0]
@@ -172,8 +180,15 @@ def detect(
         area = width * height
         ratio = width / max(1, height)
         det = (d[0], d[1], (x_min, y_min, x_max, y_max), area, ratio, region)
+        if (
+            occupancy_candidates is not None
+            and d[0] in objects_to_track
+            and width > 0
+            and height > 0
+        ):
+            occupancy_candidates.append(det)
         # apply object filters
-        if is_object_filtered(det, objects_to_track, object_filters):
+        if d[1] < 0.4 or is_object_filtered(det, objects_to_track, object_filters):
             continue
         detections.append(det)
     return detections
@@ -324,6 +339,7 @@ def process_frames(
         bounds = zone_bounds(camera_config) if occupancy_due else None
         coverage = []
         observed_detections = []
+        observed_candidates = []
 
         # if detection is disabled
         if not camera_config.detect.enabled:
@@ -456,6 +472,7 @@ def process_frames(
                 )
             }
             for region in regions:
+                candidates = [] if occupancy_due else None
                 observed = detect(
                     camera_config.detect,
                     object_detector,
@@ -464,10 +481,15 @@ def process_frames(
                     region,
                     camera_config.objects.track,
                     camera_config.objects.filters,
+                    candidates,
                 )
-                if occupancy_due and object_detector.last_detection_successful is True:
+                if (
+                    candidates is not None
+                    and object_detector.last_detection_successful is True
+                ):
                     coverage.append(region)
                     observed_detections.extend(observed)
+                    observed_candidates.extend(candidates)
                 for detection in observed:
                     detector_times[id(detection)] = frame_time
                 detections.extend(observed)
@@ -496,6 +518,7 @@ def process_frames(
             if not camera_config.detect.enabled or not occupancy_stable:
                 coverage = []
                 observed_detections = []
+                observed_candidates = []
             occupancy_detections = reduce_detections(frame_shape, observed_detections)
             occupancy_tracks = object_tracker.occupancy_tracks()
             occupancy = occupancy_frame(
@@ -517,7 +540,9 @@ def process_frames(
                 }
                 if bounds
                 else {},
-                occupancy_detections,
+                # Each crop already has a bounded NMS result. The ordinary
+                # reducer's 0.5 cutoff would discard this ambiguity again.
+                observed_candidates,
                 occupancy_tracks,
                 occupancy["complete"],
             )

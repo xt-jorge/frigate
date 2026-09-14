@@ -19,7 +19,15 @@ class TestOccupancyFrames(unittest.TestCase):
         self.camera.detect.enabled = True
         self.camera.detect.occupancy_zones = ["approach"]
 
-    def run_frames(self, times, detections=(), success=True, moving=False, regions=()):
+    def run_frames(
+        self,
+        times,
+        detections=(),
+        success=True,
+        moving=False,
+        regions=(),
+        candidates=(),
+    ):
         frames, output = Queue(), Queue()
         for time in times:
             frames.put(("fixture", time))
@@ -34,15 +42,19 @@ class TestOccupancyFrames(unittest.TestCase):
         motion.is_calibrating.return_value = True
         stop = MagicMock()
         stop.is_set.return_value = False
+
+        def inference(*args):
+            if args[-1] is not None:
+                args[-1].extend([*detections, *candidates])
+            return list(detections)
+
         with (
             patch("frigate.video.detect.CameraConfigUpdateSubscriber") as subscriber,
             patch(
                 "frigate.video.detect.get_startup_regions", return_value=list(regions)
             ),
             patch("frigate.video.detect.ptz_moving_at_frame_time", return_value=moving),
-            patch(
-                "frigate.video.detect.detect", return_value=list(detections)
-            ) as infer,
+            patch("frigate.video.detect.detect", side_effect=inference) as infer,
         ):
             subscriber.return_value.check_for_updates.return_value = []
             process_frames(
@@ -107,6 +119,16 @@ class TestOccupancyFrames(unittest.TestCase):
         frames, _ = self.run_frames([100], success=False)
         self.assertFalse(frames[0]["complete"])
         self.assertEqual(frames[0]["coverage"], [])
+
+    def test_weak_candidate_only_sets_region_uncertainty_in_existing_mqtt_frame(self):
+        weak = ("car", 0.2, (10, 10, 80, 90), 5600, 0.875, (0, 0, 320, 240))
+        frames, scans = self.run_frames([100, 100.25], candidates=[weak])
+        self.assertEqual(scans, 2)
+        for frame in frames:
+            self.assertTrue(frame["complete"])
+            self.assertEqual(frame["objects"], [])
+            self.assertEqual(frame["tracks"], [])
+            self.assertTrue(frame["regions"][0]["uncertain"])
 
     def test_disabled_detection_missing_zone_and_ptz_are_unknown(self):
         for disabled, missing, moving in [
