@@ -1,6 +1,11 @@
 """Detector coverage of existing commissioned occupancy zones."""
 
+import json
 import logging
+import multiprocessing as mp
+import time
+from collections import Counter
+from dataclasses import dataclass, field
 from math import isfinite
 from typing import TYPE_CHECKING, Any
 
@@ -14,9 +19,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 MAX_FOOTPRINTS = 64
+DIAGNOSTIC_INTERVAL_SECONDS = 10
 
 Box = tuple[int, int, int, int]
 Detection = tuple[str, float, Box, int, float, Box]
+
+
+@dataclass(frozen=True)
+class _Footprint:
+    box: Box
+    zone: str
+    observed_at: float
+
+
+@dataclass
+class _DiagnosticWindow:
+    last_report_at: float | None = None
+    frames: int = 0
+    reason_frames: Counter[str] = field(default_factory=Counter)
+    candidate_observation_frames: int = 0
+    untracked_observation_frames: int = 0
+    grace_rearm_frames: int = 0
 
 
 def contains(outer: Box, inner: Box) -> bool:
@@ -128,12 +151,13 @@ class OccupancyContinuity:
     def __init__(self, rejection_grace: float) -> None:
         self.classifier = StationaryMotionClassifier()
         self.rejection_grace = rejection_grace
-        self.footprints: dict[str, tuple[Box, str]] = {}
+        self.footprints: dict[str, _Footprint] = {}
         self.raw_pending: dict[str, dict[str, float]] = {}
         self.zone_configuration: dict[str, bytes] = {}
         self.saturated: set[str] = set()
         self.last_frame = 0.0
         self.last_complete = False
+        self.diagnostics: dict[str, _DiagnosticWindow] = {}
 
     def observe(
         self,
@@ -153,20 +177,30 @@ class OccupancyContinuity:
             )
             for name, points in zones.items()
         }
+        self.diagnostics = {
+            zone: window for zone, window in self.diagnostics.items() if zone in zones
+        }
         if frame_time <= self.last_frame:
+            for zone in bounds:
+                self.record_diagnostics(zone, frame_time, ["non_monotonic_frame"])
             return [
                 {"zone": name, "box": list(box), "uncertain": True}
                 for name, box in bounds.items()
             ]
+        grace_rearmed = set()
         if not complete or not self.last_complete or frame_time - self.last_frame > 1:
-            for pending in self.raw_pending.values():
+            for zone, pending in self.raw_pending.items():
+                if pending:
+                    grace_rearmed.add(zone)
                 for identity in pending:
                     pending[identity] = frame_time
         self.last_frame = frame_time
         self.last_complete = complete
         configuration = {name: points.tobytes() for name, points in zones.items()}
-        for key, (_, zone) in list(self.footprints.items()):
-            if configuration.get(zone) != self.zone_configuration.get(zone):
+        for key, footprint in list(self.footprints.items()):
+            if configuration.get(footprint.zone) != self.zone_configuration.get(
+                footprint.zone
+            ):
                 self.footprints.pop(key)
                 self.forget_footprint(key)
         self.raw_pending = {
@@ -184,6 +218,12 @@ class OccupancyContinuity:
         result = []
         for zone, region in bounds.items():
             if not complete:
+                self.record_diagnostics(
+                    zone,
+                    frame_time,
+                    ["incomplete_coverage"],
+                    grace_rearmed=zone in grace_rearmed,
+                )
                 result.append({"zone": zone, "box": list(region), "uncertain": True})
                 continue
             contour = zones[zone]
@@ -222,8 +262,8 @@ class OccupancyContinuity:
                 self.forget_footprint(key)
                 # Aggregate geometry, not vehicle identity: a fresh footprint
                 # covering an older one carries all of its occupied pixels.
-                for old_key, (old_box, old_zone) in list(self.footprints.items()):
-                    if old_zone == zone and contains(box, old_box):
+                for old_key, old in list(self.footprints.items()):
+                    if old.zone == zone and contains(box, old.box):
                         self.footprints.pop(old_key)
                         self.forget_footprint(old_key)
                 if len(self.footprints) >= MAX_FOOTPRINTS:
@@ -237,31 +277,154 @@ class OccupancyContinuity:
                 self.forget_footprint(key)
                 for name, part in self.footprint_parts(key, box):
                     self.classifier.ensure_anchor(name, frame, part)
-                self.footprints[key] = (box, zone)
+                self.footprints[key] = _Footprint(box, zone, frame_time)
             # Raw boxes not accounted for by a confirmed track remain candidates,
             # not permanent claims that a particular vehicle must later discharge.
+            candidate_observed = untracked_observed = False
             for detection in raw:
                 if any(contains(track["box"], detection[2]) for track in confirmed):
                     continue
+                candidate_observed = True
                 candidates = [
                     track for track in current if contains(track["box"], detection[2])
                 ]
                 for track in candidates:
                     pending[track["id"]] = frame_time
                 if not candidates:
+                    untracked_observed = True
                     pending["untracked"] = frame_time
             uncertain = bool(pending) or zone in self.saturated
+            reasons = []
+            if pending:
+                reasons.append("pending_candidates")
+            if zone in self.saturated:
+                reasons.append("saturated")
             current_keys = {f"{zone}:{track['id']}" for track in current}
-            for key, (box, area) in list(self.footprints.items()):
-                if area != zone:
+            track_footprints = pixel_footprints = 0
+            for key, footprint in list(self.footprints.items()):
+                if footprint.zone != zone:
                     continue
-                if key in current_keys or self.keep_footprint(key, frame, box):
+                if key in current_keys:
+                    track_footprints += 1
+                    uncertain = True
+                elif self.keep_footprint(key, frame, footprint.box):
+                    pixel_footprints += 1
                     uncertain = True
                 else:
                     self.footprints.pop(key)
                     self.forget_footprint(key)
+            if track_footprints:
+                reasons.append("current_track")
+            if pixel_footprints:
+                reasons.append("retained_pixels")
+            self.record_diagnostics(
+                zone,
+                frame_time,
+                reasons or ["no_continuity_hold"],
+                current=current,
+                raw_count=len(raw),
+                track_footprints=track_footprints,
+                pixel_footprints=pixel_footprints,
+                candidate_observed=candidate_observed,
+                untracked_observed=untracked_observed,
+                grace_rearmed=zone in grace_rearmed,
+            )
             result.append({"zone": zone, "box": list(region), "uncertain": uncertain})
         return result
+
+    def record_diagnostics(
+        self,
+        zone: str,
+        frame_time: float,
+        reasons: list[str],
+        *,
+        current: list[dict[str, Any]] | None = None,
+        raw_count: int | None = None,
+        track_footprints: int | None = None,
+        pixel_footprints: int | None = None,
+        candidate_observed: bool = False,
+        untracked_observed: bool = False,
+        grace_rearmed: bool = False,
+    ) -> None:
+        """Count every hold but log only bounded, local summaries without object IDs.
+
+        Reason counts cover the window; inventory and ages describe its last frame.
+        An absent continuity hold does not establish clearance: the consumer also
+        evaluates current object and track overlap from the unchanged frame payload.
+        Pending quiet age restarts on a sighting or coverage gap. Footprint age is
+        since its current image anchor was captured, not since the first obstacle.
+        Neither clock is a deadline for clearing occupancy.
+        """
+        if zone not in self.diagnostics:
+            self.diagnostics[zone] = _DiagnosticWindow()
+        window = self.diagnostics[zone]
+        window.frames += 1
+        window.reason_frames.update(reasons)
+        window.candidate_observation_frames += candidate_observed
+        window.untracked_observation_frames += untracked_observed
+        window.grace_rearm_frames += grace_rearmed
+        now = time.monotonic()
+        if (
+            window.last_report_at is not None
+            and now - window.last_report_at < DIAGNOSTIC_INTERVAL_SECONDS
+        ):
+            return
+        pending = self.raw_pending.get(zone, {})
+        footprints = [value for value in self.footprints.values() if value.zone == zone]
+        clocks = [
+            track["detector_observed_at"]
+            for track in current or []
+            if track.get("detector_observed_at") is not None
+        ]
+
+        def oldest_age(clocks: list[float]) -> float | None:
+            return round(max(0.0, frame_time - min(clocks)), 3) if clocks else None
+
+        summary = {
+            "process": mp.current_process().name,
+            "zone": zone,
+            "frame_time": frame_time,
+            "window_s": round(now - window.last_report_at, 3)
+            if window.last_report_at is not None
+            else 0.0,
+            "frames": window.frames,
+            "reason_frames": dict(window.reason_frames),
+            "candidate_observation_frames": window.candidate_observation_frames,
+            "untracked_observation_frames": window.untracked_observation_frames,
+            "grace_rearm_frames": window.grace_rearm_frames,
+            "pending_candidates": len(pending),
+            "pending_untracked": "untracked" in pending,
+            "oldest_pending_quiet_age_s": oldest_age(list(pending.values())),
+            "footprints": len(footprints),
+            "oldest_footprint_anchor_age_s": oldest_age(
+                [value.observed_at for value in footprints]
+            ),
+            "saturated": zone in self.saturated,
+            "raw_overlaps": raw_count,
+            "track_overlaps": len(current) if current is not None else None,
+            "uninitialized_overlaps": sum(not track["initialized"] for track in current)
+            if current is not None
+            else None,
+            "stale_track_overlaps": sum(
+                track["frame_time"] != frame_time
+                or track.get("detector_observed_at") != frame_time
+                for track in current
+            )
+            if current is not None
+            else None,
+            "oldest_track_observation_age_s": oldest_age(clocks),
+            "track_footprints": track_footprints,
+            "pixel_footprints": pixel_footprints,
+        }
+        logger.info(
+            "Occupancy continuity %s", json.dumps(summary, separators=(",", ":"))
+        )
+        window.last_report_at = now
+        window.frames = 0
+        window.reason_frames.clear()
+        window.candidate_observation_frames = 0
+        window.untracked_observation_frames = 0
+        window.grace_rearm_frames = 0
 
     @staticmethod
     def footprint_parts(key: str, box: Box) -> list[tuple[str, Box]]:

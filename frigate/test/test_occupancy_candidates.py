@@ -16,6 +16,11 @@ from frigate.video.occupancy import OccupancyContinuity, intersects_polygon
 
 
 class TestOccupancyCandidates(unittest.TestCase):
+    def setUp(self):
+        self.model = ModelConfig(
+            labelmap_path=str(Path(__file__).resolve().parents[2] / "labelmap.txt")
+        )
+
     def test_retained_model_outputs_keep_initial_clear_and_partial_roof_unknown(self):
         fixture = json.loads(
             (
@@ -62,7 +67,7 @@ class TestOccupancyCandidates(unittest.TestCase):
                             DetectConfig(width=704, height=576),
                             detector,
                             None,
-                            ModelConfig(),
+                            self.model,
                             tuple(fixture["crop"]),
                             list(filters),
                             filters,
@@ -123,7 +128,7 @@ class TestOccupancyCandidates(unittest.TestCase):
                 DetectConfig(width=704, height=576),
                 detector,
                 None,
-                ModelConfig(),
+                self.model,
                 (0, 0, 948, 948),
                 ["car"],
                 {"car": SimpleNamespace(min_score=0.5)},
@@ -172,7 +177,7 @@ class TestOccupancyCandidates(unittest.TestCase):
                 DetectConfig(width=320, height=320),
                 detector,
                 None,
-                ModelConfig(),
+                self.model,
                 (0, 0, 320, 320),
                 ["car"],
                 filters,
@@ -190,7 +195,7 @@ class TestOccupancyCandidates(unittest.TestCase):
                     DetectConfig(width=320, height=320),
                     detector,
                     None,
-                    ModelConfig(),
+                    self.model,
                     (0, 0, 320, 320),
                     ["car"],
                     {},

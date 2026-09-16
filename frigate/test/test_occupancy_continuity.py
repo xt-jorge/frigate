@@ -208,6 +208,62 @@ class TestOccupancyContinuity(unittest.TestCase):
             self.assertEqual(len(self.owner.footprints), 1)
             self.assertEqual(len(self.owner.classifier.anchor_crops), 5)
 
+    def test_fresh_outside_track_cannot_discharge_an_absorbed_obstacle(self):
+        person = {
+            **self.track,
+            "id": "native-generation:person:2",
+            "box": [40, 50, 55, 80],
+        }
+        self.assertTrue(self.observe(100, [person]))
+        car = {**self.track, "frame_time": 100.25, "detector_observed_at": 100.25}
+        self.assertTrue(self.observe(100.25, [car]))
+        # The car's enclosing footprint now owns the earlier person's pixels.
+        self.assertEqual(set(self.owner.footprints), {f"zone:{car['id']}"})
+        for tick in range(2, 22):
+            at = 100 + tick / 4
+            outside = {
+                **car,
+                "box": [0, 0, 10, 10],
+                "frame_time": at,
+                "detector_observed_at": at,
+            }
+            self.assertTrue(self.observe(at, [outside]))
+            self.assertEqual(len(self.owner.footprints), 1)
+
+    def test_outside_track_freshness_or_initialization_cannot_erase_retained_pixels(
+        self,
+    ):
+        for initialized, frame_clock, detector_clock in [
+            (True, 100.25, 100),
+            (True, 100, 100),
+            (False, 100.25, 100.25),
+        ]:
+            with self.subTest(
+                initialized=initialized,
+                frame_clock=frame_clock,
+                detector_clock=detector_clock,
+            ):
+                self.owner = OccupancyContinuity(5)
+                self.observe(100, [self.track])
+                outside = {
+                    **self.track,
+                    "box": [0, 0, 10, 10],
+                    "initialized": initialized,
+                    "frame_time": frame_clock,
+                    "detector_observed_at": detector_clock,
+                }
+                self.assertTrue(self.observe(100.25, [outside]))
+
+    def test_repeated_low_score_candidate_holds_until_independent_quiet_grace(self):
+        weak = ("car", 0.12, self.box, 3600, 1, self.region)
+        for tick in range(2401):
+            self.assertTrue(
+                self.observe(100 + tick / 4, raw=[weak] if tick % 16 == 0 else [])
+            )
+        for tick in range(1, 20):
+            self.assertTrue(self.observe(700 + tick / 4))
+        self.assertFalse(self.observe(705))
+
     def test_same_track_replaces_jittered_footprint_without_capacity_growth(self):
         for tick in range(100):
             at = 100 + tick / 4
