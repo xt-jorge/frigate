@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 from collections import defaultdict
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import cv2
 import numpy as np
@@ -14,7 +14,12 @@ from frigate.config import (
     FrigateConfig,
     ZoomingModeEnum,
 )
-from frigate.const import CLIPS_DIR, THUMB_DIR
+from frigate.const import (
+    CLIPS_DIR,
+    THUMB_DIR,
+    TRACK_FRAME_LABELS,
+    VEHICLE_LABELS,
+)
 from frigate.ptz.autotrack import PtzAutoTrackerThread
 from frigate.track.tracked_object import TrackedObject
 from frigate.util.image import (
@@ -26,6 +31,36 @@ from frigate.util.image import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How many raw face regions may ride one frame. Past this the hint is dropped
+# whole: a truncated list would read as a complete one and hide a face.
+MAX_FRAME_FACES = 16
+
+
+class FrozenVehicle(NamedTuple):
+    """A vehicle's plain geometry and provenance, frozen with its own frame.
+
+    `detector_observed_at` is when the model last actually observed this track,
+    which is not the frame clock for a stationary track whose box was reused.
+    It is None when the track has no model observation at all.
+    """
+
+    box: tuple[int, int, int, int]
+    id: str
+    detector_observed_at: float | None
+
+
+class FrozenFace(NamedTuple):
+    """A raw primary-detector face region, taken before parent assignment.
+
+    Parent assignment is deliberately not applied: `face` maps to `person`
+    alone, so a windshield face on a car track is assigned to nothing and would
+    never leave here. This carries no identity and claims no vehicle membership.
+    """
+
+    box: tuple[int, int, int, int]
+    score: float
+    detector_observed_at: float
 
 
 class CameraState:
@@ -48,10 +83,13 @@ class CameraState:
         self._last_frame_shape: tuple[int, int] = self.camera_config.frame_shape_yuv
         self.current_frame_lock = threading.Lock()
         self.current_frame_time = 0.0
-        self._current_frame_vehicles: tuple[tuple[int, int, int, int], ...] = ()
+        self._current_frame_vehicles: tuple[FrozenVehicle, ...] = ()
         self._current_frame_tracks: tuple[tuple[str, str, float | None], ...] | None = (
             None
         )
+        # None means no face observation pass belongs to the published frame, so
+        # no hint exists. An empty tuple means a pass ran and produced none.
+        self._current_frame_faces: tuple[FrozenFace, ...] | None = None
         self.motion_boxes: list[tuple[int, int, int, int]] = []
         self.regions: list[tuple[int, int, int, int]] = []
         self.previous_frame_id: str | None = None
@@ -97,7 +135,8 @@ class CameraState:
             np.ndarray | None,
             float,
             tuple[str, str, float | None] | None,
-            tuple[tuple[int, int, int, int], ...],
+            tuple[FrozenVehicle, ...],
+            tuple[FrozenFace, ...] | None,
         ]
         | None
     ):
@@ -111,18 +150,25 @@ class CameraState:
             )
             frame_time = self.current_frame_time
             vehicles = self._current_frame_vehicles
+            faces = self._current_frame_faces
             if (
                 track is None
-                or track[1] not in {"person", "car", "truck", "bus", "motorcycle"}
+                or track[1] not in TRACK_FRAME_LABELS
                 or track[2] is not None
             ):
-                return None, frame_time, track, vehicles
+                return None, frame_time, track, vehicles, faces
             frame = np.copy(self._current_frame)
-        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420), frame_time, track, vehicles
+        return (
+            cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420),
+            frame_time,
+            track,
+            vehicles,
+            faces,
+        )
 
     def get_calibration_frame(
         self,
-    ) -> tuple[np.ndarray, float, tuple[tuple[int, int, int, int], ...]]:
+    ) -> tuple[np.ndarray, float, tuple[FrozenVehicle, ...]]:
         """Copy one published frame and its frozen vehicle boxes under the same lock."""
         with self.current_frame_lock:
             frame = np.copy(self._current_frame)
@@ -401,7 +447,16 @@ class CameraState:
         current_detections: dict[str, dict[str, Any]],
         motion_boxes: list[tuple[int, int, int, int]],
         regions: list[tuple[int, int, int, int]],
+        face_regions: tuple[FrozenFace, ...] | None = None,
     ) -> None:
+        """Publish one frame with the geometry that was measured on it.
+
+        Args:
+            face_regions: Raw face detections observed on this exact frame,
+                before parent assignment, or None when this frame carries no
+                face observation pass. None and an empty tuple are different
+                claims and must stay distinguishable all the way to the wire.
+        """
         if self._discard_stale_resolution_state(current_detections):
             return
 
@@ -505,7 +560,7 @@ class CameraState:
                 and obj_area >= self.face_recognition_min_obj_area
                 and updated_obj.obj_data.get("sub_label") is None
             ) or (
-                obj_label in ("car", "motorcycle")
+                obj_label in VEHICLE_LABELS
                 and self.lpr_min_obj_area > 0
                 and obj_area >= self.lpr_min_obj_area
                 and updated_obj.obj_data.get("sub_label") is None
@@ -664,6 +719,7 @@ class CameraState:
             self.motion_boxes = motion_boxes
             self.regions = regions
             self._current_frame_tracks = None
+            self._current_frame_faces = None
 
             if current_frame is not None:
                 self.current_frame_time = frame_time
@@ -683,20 +739,27 @@ class CameraState:
                 )
                 # Objects update outside this lock. Freeze plain coordinates when
                 # installing their exact image; later API reads never dereference
-                # mutable tracker objects to annotate an older frame.
+                # mutable tracker objects to annotate an older frame. The raw
+                # detector clock rides along unrounded, so a reused stationary
+                # box can never pass as a fresh measurement of this frame.
                 self._current_frame_vehicles = tuple(
-                    (
-                        int(obj.obj_data["box"][0]),
-                        int(obj.obj_data["box"][1]),
-                        int(obj.obj_data["box"][2]),
-                        int(obj.obj_data["box"][3]),
+                    FrozenVehicle(
+                        (
+                            int(obj.obj_data["box"][0]),
+                            int(obj.obj_data["box"][1]),
+                            int(obj.obj_data["box"][2]),
+                            int(obj.obj_data["box"][3]),
+                        ),
+                        obj.obj_data["id"],
+                        obj.obj_data.get("detector_observed_at"),
                     )
                     for obj in tracked_objects.values()
                     if obj.obj_data["frame_time"] == frame_time
-                    and obj.obj_data["label"] in {"car", "truck", "bus", "motorcycle"}
+                    and obj.obj_data["label"] in VEHICLE_LABELS
                     and not obj.false_positive
                     and obj.obj_data.get("end_time") is None
                 )
+                self._current_frame_faces = face_regions
 
                 if self.previous_frame_id is not None:
                     self.frame_manager.close(self.previous_frame_id)

@@ -17,6 +17,8 @@ import cv2
 import numpy as np
 from unidecode import unidecode
 
+from frigate.const import VEHICLE_LABELS
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,8 +89,8 @@ def is_better_thumbnail(
         if any([a["label"] == "face" for a in current_thumb["attributes"]]):
             return False
 
-    # check license_plate on car
-    if label in ["car", "motorcycle"]:
+    # check license_plate on any vehicle that can carry one
+    if label in VEHICLE_LABELS:
         if has_better_attr(current_thumb, new_obj, "license_plate"):
             return True
         # if the current thumb has a license_plate attr, dont update unless it gets better

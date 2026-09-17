@@ -221,9 +221,17 @@ class LicensePlatePostProcessor(LicensePlateProcessingMixin, PostProcessorApi): 
                     new_attributes.append(attr)
             keyframe_obj_data["current_attributes"] = new_attributes
 
-        # run the frame through lpr processing
+        # run the frame through lpr processing. The boxes above were scaled and
+        # enlarged onto this recording keyframe, so they describe it even though
+        # no detector ran on it - which is the one case where the same-frame
+        # region check has to be the caller's assertion rather than a clock.
         logger.debug(f"Post processing plate: {event_id}, {frame_time}")
-        self.lpr_process(keyframe_obj_data, frame, source_frame_time=frame_time)
+        self.lpr_process(
+            keyframe_obj_data,
+            frame,
+            source_frame_time=frame_time,
+            reprojected_regions=True,
+        )
 
     def handle_request(self, topic: str, request_data: dict) -> dict[str, Any] | None:
         if topic == EmbeddingsRequestEnum.reprocess_plate.value:

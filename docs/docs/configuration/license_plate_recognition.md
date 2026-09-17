@@ -7,13 +7,13 @@ import ConfigTabs from "@site/src/components/ConfigTabs";
 import TabItem from "@theme/TabItem";
 import NavPath from "@site/src/components/NavPath";
 
-Frigate can recognize license plates on vehicles and automatically add the detected characters to the `recognized_license_plate` field or a [known](#matching) name as a `sub_label` to tracked objects of type `car` or `motorcycle`. A common use case may be to read the license plates of cars pulling into a driveway or cars passing by on a street.
+Frigate can recognize license plates on vehicles and automatically add the detected characters to the `recognized_license_plate` field or a [known](#matching) name as a `sub_label` to tracked objects of type `car` or `motorcycle` — and, on models that emit them, `school_bus` or `garbage_truck`. A common use case may be to read the license plates of cars pulling into a driveway or cars passing by on a street.
 
-LPR works best when the license plate is clearly visible to the camera. For moving vehicles, Frigate clusters successful readings to select plate text. A new sample refreshes the published confidence and capture time only when its text agrees with that selected representative. When a vehicle becomes stationary, LPR continues to run for a short time after to attempt recognition.
+LPR works best when the license plate is clearly visible to the camera. Every reading that passes the confidence, length and format checks is published as itself: the text, the confidence and the capture time all come from that one reading. As the vehicle moves and the view improves or degrades, `recognized_license_plate` follows the readings honestly, including when a later reading disagrees with an earlier one. Frigate still clusters the readings of a track to choose the plate it displays as the track's summary, but that summary never decides what is published and never lends its confidence or capture time to a different reading. When a vehicle becomes stationary, LPR continues to run for a short time after to attempt recognition.
 
 :::info
 
-License plate recognition requires a one-time internet connection to download OCR and detection models from GitHub. Once cached, models work fully offline. See [Network Requirements](/frigate/network_requirements#one-time-model-downloads) for details.
+License plate recognition requires a one-time internet connection to download OCR and detection models from GitHub and HuggingFace. Once cached, models work fully offline. See [Network Requirements](/frigate/network_requirements#one-time-model-downloads) for details.
 
 :::
 
@@ -44,6 +44,20 @@ Users running a Frigate+ model (or any custom model that natively detects licens
 
 Users without a model that detects license plates can still run LPR. Frigate uses a lightweight YOLOv9 license plate detection model that can be configured to run on your CPU or GPU. In this case, you should _not_ define `license_plate` in your list of objects to track.
 
+When `license_plate` is tracked, Frigate uses the plate region the model measured on the frame it is about to read. A region carried over from an earlier frame is not evidence about the current pixels, because whatever has since moved into that box would be read instead.
+
+If no such plate region exists for a vehicle on this frame, Frigate falls back once to the lightweight YOLOv9 locator and looks inside that vehicle — but only when the model measured **that vehicle's** box on this same frame. Frigate's tracker keeps a vehicle's box and advances its frame time while the vehicle is assumed to still be there, so a box arriving with the current frame is not necessarily a box the detector confirmed on it. Looking inside a carried box would find whatever plate now occupies those pixels — in close-following traffic, the next vehicle's — and publish it under the first vehicle's track. So when the vehicle's own detection is not from this frame, the attempt is skipped rather than guessed, and recognition resumes on the next frame the detector does confirm the vehicle on.
+
+A usable plate region that *was* measured on this frame remains eligible for recognition even if the vehicle around it was not re-detected — the region describes those pixels on its own. The existing minimum-area and sampling limits still apply.
+
+There is only ever one locator call and one OCR call per attempt, and the existing rate limits are unchanged.
+
+:::note
+
+For a vehicle that has been parked long enough to count as stationary, Frigate re-confirms it with the detector only every `detect.stationary.interval` frames (by default `detect.fps * 10`, so roughly every ten seconds), or sooner if motion overlaps it. Between those confirmations this fallback does not run, so a long-parked vehicle whose plate the model does not report as an attribute is read less often than a moving one. This only affects the fallback; a reported plate region is read whenever it appears.
+
+:::
+
 :::note
 
 In the default mode, Frigate's LPR needs to first detect a `car` or `motorcycle` before it can recognize a license plate. If you're using a dedicated LPR camera and have a zoomed-in view where a `car` or `motorcycle` will not be detected, you can still run LPR, but the configuration parameters will differ from the default mode. See the [Dedicated LPR Cameras](#dedicated-lpr-cameras) section below.
@@ -52,7 +66,20 @@ In the default mode, Frigate's LPR needs to first detect a `car` or `motorcycle`
 
 ## Minimum System Requirements
 
-License plate recognition works by running AI models locally on your system. The YOLOv9 plate detector model and the OCR models ([PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)) are relatively lightweight and can run on your CPU or GPU, depending on your configuration. At least 4GB of RAM and a CPU with AVX + AVX2 instructions is required.
+License plate recognition works by running AI models locally on your system. The YOLOv9 plate detector model and the [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) text detection and classification models are lightweight and can run on your CPU or GPU, depending on your configuration. Text recognition uses the PP-OCRv6 medium ONNX export, which is around 73 MB of model cache on its own. At least 4GB of RAM and a CPU with AVX + AVX2 instructions is required.
+
+### Recognition model provenance
+
+The text recognition model and its label map are pinned to one immutable upstream revision, so a cached file can never quietly become a different model:
+
+| Upstream file    | Cached as                         | Bytes      | sha256                                                             |
+| ---------------- | --------------------------------- | ---------- | ------------------------------------------------------------------ |
+| `inference.onnx` | `recognition_ppocrv6_medium.onnx` | 76,554,979 | `9c09abf0957f7968c7586464b7397b84ad2387a0497a351af40e9acc71b673ba` |
+| `inference.yml`  | `recognition_ppocrv6_medium.yml`  | 150,580    | `991b700facf5b50a7de193468207d5f4255b538dde0d312ae3b7c7a9b6873129` |
+
+Both come from the HuggingFace repository `PaddlePaddle/PP-OCRv6_medium_rec_onnx` at revision `50c7eacafc52fa7bcf4194e8cd08e46f8558504b`.
+
+`inference.yml` is not an optional extra. It carries the ordered label map the network was trained against, and Frigate decodes against it verbatim — including the entries Python would treat as blank. If it is missing, unreadable, or does not describe exactly the 18710 classes the model emits, recognition fails to start rather than decode against a map that would return the wrong character for every index.
 
 ## Configuration
 
@@ -97,7 +124,7 @@ cameras:
 </TabItem>
 </ConfigTabs>
 
-For non-dedicated LPR cameras, ensure that your camera is configured to detect objects of type `car` or `motorcycle`, and that a car or motorcycle is actually being detected by Frigate. Otherwise, LPR will not run.
+For non-dedicated LPR cameras, ensure that your camera is configured to detect a vehicle type that carries a plate — `car` or `motorcycle`, plus `school_bus` and `garbage_truck` on models that emit them — and that such a vehicle is actually being detected by Frigate. Otherwise, LPR will not run.
 
 Like the other real-time processors in Frigate, license plate recognition runs on the camera stream defined by the `detect` role in your config. To ensure optimal performance, select a suitable resolution for this stream in your camera's firmware that fits your specific scene and requirements.
 
@@ -212,6 +239,8 @@ lpr:
 </ConfigTabs>
 
 If Frigate is already recognizing plates correctly, leave enhancement at the default of `0`. However, if you're experiencing frequent character issues or incomplete plates and you can already easily read the plates yourself, try increasing the value gradually, starting at 3 and adjusting as needed. Use the `debug_save_plates` configuration option (see below) to see how different enhancement levels affect your plates.
+
+The enhancement filters work on brightness alone, so any value above `0` also costs you colour: the recognizer receives a grayscale plate instead of the colour crop it is given at `0`. That is a fair trade when the filters are what your scene needs, and a needless one otherwise.
 
 ### Normalization Rules
 

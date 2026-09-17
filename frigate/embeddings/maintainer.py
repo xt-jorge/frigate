@@ -864,7 +864,7 @@ class EmbeddingMaintainer(threading.Thread):
             return False
         box = obj.get("box")
         height, width = camera_config.frame_shape
-        return (
+        if not (
             isinstance(box, (list, tuple))
             and len(box) == 4
             and all(
@@ -875,7 +875,14 @@ class EmbeddingMaintainer(threading.Thread):
             )
             and 0 <= box[0] < box[2] <= width
             and 0 <= box[1] < box[3] <= height
-        )
+        ):
+            return False
+        # A track that cannot yield a region measured on this frame must not be
+        # chosen: selection is where the attempt clocks are stamped, so letting
+        # it through would spend the one OCR slot and, on a stationary vehicle,
+        # could keep missing the periodic frame the detector does re-measure it
+        # on purely through phase alignment.
+        return processor.plate_region_available(camera, obj, frame_time)
 
     def _process_deferred_results(self) -> None:
         """Drain results from deferred processors and perform IPC side-effects."""

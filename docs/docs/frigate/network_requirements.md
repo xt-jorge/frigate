@@ -29,7 +29,7 @@ The following models are downloaded automatically the first time their associate
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------- |
 | [Semantic search](/configuration/semantic_search)                                             | Jina CLIP v1 or v2 (ONNX) + tokenizer                                      | HuggingFace          |
 | [Face recognition](/configuration/face_recognition)                                           | FaceNet, ArcFace, face detection model                                     | GitHub               |
-| [License plate recognition](/configuration/license_plate_recognition)                         | PaddleOCR (detection, classification, recognition) + YOLOv9 plate detector | GitHub               |
+| [License plate recognition](/configuration/license_plate_recognition)                         | PaddleOCR detection + classification, YOLOv9 plate detector (GitHub); PP-OCRv6 medium text recognition + its label map (HuggingFace) | GitHub / HuggingFace |
 | [Bird classification](/configuration/bird_classification)                                     | MobileNetV2 bird model + label map                                         | GitHub               |
 | [Custom classification](/configuration/custom_classification/state_classification) (training) | MobileNetV2 ImageNet base weights (via Keras)                              | Google storage       |
 | [Audio transcription](/configuration/advanced/system)                                                | Whisper or Sherpa-ONNX streaming model                                     | HuggingFace / OpenAI |

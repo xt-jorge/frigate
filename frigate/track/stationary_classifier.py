@@ -50,7 +50,17 @@ STATIONARY_OBJECT_THRESHOLDS = StationaryThresholds(
 
 # Thresholds for objects that are active but can be stationary for longer periods of time
 DYNAMIC_OBJECT_THRESHOLDS = StationaryThresholds(
-    objects=["bicycle", "boat", "car", "motorcycle", "tractor", "truck"],
+    objects=[
+        "bicycle",
+        "boat",
+        "bus",
+        "car",
+        "garbage_truck",
+        "motorcycle",
+        "school_bus",
+        "tractor",
+        "truck",
+    ],
     active_check_iou=0.75,
     motion_classifier_enabled=True,
 )

@@ -57,6 +57,7 @@ class TestRecognizedPlatePublication(unittest.TestCase):
         self.processor.create_camera_state(CAMERA)
         self.state = self.processor.camera_states[CAMERA]
         self.frame_time = 99.0
+        self.observed_at = 99.0
         self.score = 0.9
         event_get = patch(
             "frigate.track.object_processing.Event.get", side_effect=DoesNotExist
@@ -64,12 +65,30 @@ class TestRecognizedPlatePublication(unittest.TestCase):
         event_get.start()
         self.addCleanup(event_get.stop)
 
-    def next_frame(self, step: float = 1) -> None:
+    def next_frame(
+        self,
+        step: float = 1,
+        *,
+        observed: bool = True,
+        attributes: list[dict] | None = None,
+        face_regions=None,
+    ) -> None:
+        """Publish one frame for the tracked car.
+
+        Args:
+            observed: Whether the model measured this box on this frame. False
+                is the stationary case, where the tracker carries an older
+                measurement forward onto the current frame clock.
+            attributes: Per-frame attribute regions assigned to this track.
+            face_regions: Raw face regions frozen with this frame, or None when
+                the frame carries no face observation pass.
+        """
         self.frame_time += step
         detection = {
             "id": EVENT_ID,
             "label": "car",
             "frame_time": self.frame_time,
+            "detector_observed_at": self.frame_time if observed else self.observed_at,
             "start_time": 100.0,
             "score": self.score,
             "box": (100, 100, 200, 200),
@@ -79,12 +98,19 @@ class TestRecognizedPlatePublication(unittest.TestCase):
             "region": (0, 0, 320, 240),
             "motionless_count": 100,
             "position_changes": 1,
-            "attributes": [],
+            "attributes": attributes or [],
         }
+        if observed:
+            self.observed_at = self.frame_time
         if EVENT_ID not in self.state.tracked_objects:
             detection["score_history"] = [self.score] * 3
         self.state.update(
-            f"frame-{self.frame_time}", self.frame_time, {EVENT_ID: detection}, [], []
+            f"frame-{self.frame_time}",
+            self.frame_time,
+            {EVENT_ID: detection},
+            [],
+            [],
+            face_regions,
         )
 
     def start_stationary_track(self, score: float = 0.9) -> None:

@@ -11,6 +11,7 @@ from typing import Any
 import cv2
 
 from frigate.camera import CameraMetrics, PTZMetrics
+from frigate.camera.state import FrozenFace
 from frigate.comms.inter_process import InterProcessRequestor
 from frigate.config import CameraConfig, DetectConfig, LoggerConfig, ModelConfig
 from frigate.config.camera.camera import CameraTypeEnum
@@ -331,6 +332,7 @@ def process_frames(
 
         regions = []
         consolidated_detections = []
+        detector_times: dict[int, float | None] = {}
         occupancy = None
         occupancy_due = (
             bool(camera_config.detect.occupancy_zones)
@@ -460,17 +462,19 @@ def process_frames(
 
             # Reduction retains selected tuple objects, so provenance follows the
             # exact winning box, including reused stationary detections.
-            detector_times = {
-                id(detection): obj.get("detector_observed_at")
-                for detection, obj in zip(
-                    detections,
-                    (
-                        obj
-                        for obj in object_tracker.tracked_objects.values()
-                        if obj["id"] in stationary_object_ids
-                    ),
-                )
-            }
+            detector_times.update(
+                {
+                    id(detection): obj.get("detector_observed_at")
+                    for detection, obj in zip(
+                        detections,
+                        (
+                            obj
+                            for obj in object_tracker.tracked_objects.values()
+                            if obj["id"] in stationary_object_ids
+                        ),
+                    )
+                }
+            )
             for region in regions:
                 candidates = [] if occupancy_due else None
                 observed = detect(
@@ -488,8 +492,16 @@ def process_frames(
                     and object_detector.last_detection_successful is True
                 ):
                     coverage.append(region)
-                    observed_detections.extend(observed)
-                    observed_candidates.extend(candidates)
+                    # A plate or a face is a property of the thing carrying it.
+                    # Tracking already refuses attributes; occupancy has to as
+                    # well, or a plate becomes a second vehicle in the zone and
+                    # a windshield face becomes an occupant of its own.
+                    observed_detections.extend(
+                        d for d in observed if d[0] not in all_attributes
+                    )
+                    observed_candidates.extend(
+                        d for d in candidates if d[0] not in all_attributes
+                    )
                 for detection in observed:
                     detector_times[id(detection)] = frame_time
                 detections.extend(observed)
@@ -553,13 +565,30 @@ def process_frames(
         for obj in object_tracker.tracked_objects.values():
             detections[obj["id"]] = {**obj, "attributes": []}
 
+        # Freeze the raw face regions before anything is assigned a parent.
+        # attributes_map sends face to person alone and find_best_object needs
+        # containment, so a windshield face on a car track ends up owned by
+        # nothing - which is precisely the case a vehicle capture needs. None
+        # means this frame had no face observation pass at all, which is a
+        # different claim from an empty pass and stays distinguishable.
+        face_regions: tuple[FrozenFace, ...] | None = None
+        if regions and "face" in camera_config.objects.track:
+            face_regions = tuple(
+                FrozenFace(tuple(int(v) for v in d[2]), float(d[1]), frame_time)
+                for d in consolidated_detections
+                # Equality against the raw clock, before any rounding: a reused
+                # detection shares a track and a frame time without ever having
+                # been measured on these pixels.
+                if d[0] == "face" and detector_times.get(id(d)) == frame_time
+            )
+
         # assign each detected attribute to the best matching object.
         # iterate consolidated_detections once so attributes that appear under
         # multiple parent labels in attributes_map (e.g. license_plate is in
         # both "car" and "motorcycle") are not appended more than once
         all_objects: list[dict[str, Any]] = object_tracker.tracked_objects.values()
         detected_attributes = [
-            TrackedObjectAttribute(d)
+            TrackedObjectAttribute(d, detector_times.get(id(d)))
             for d in consolidated_detections
             if d[0] in all_attributes
         ]
@@ -662,6 +691,7 @@ def process_frames(
                     motion_boxes,
                     regions,
                     occupancy,
+                    face_regions,
                 )
             )
             camera_metrics.detection_fps.value = object_detector.fps.eps()
