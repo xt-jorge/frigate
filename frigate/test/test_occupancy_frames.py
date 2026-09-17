@@ -164,7 +164,7 @@ class TestOccupancyFrames(unittest.TestCase):
         processor.last_motion_detected = {}
         processor.tracked_objects_queue = Queue()
         processor.tracked_objects_queue.put(
-            ("front", "fixture", 100, {}, [], [], frames[0])
+            ("front", "fixture", 100, {}, [], [], frames[0], None)
         )
         processor.run()
         messages = [

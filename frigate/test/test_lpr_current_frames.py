@@ -35,12 +35,18 @@ def camera_config(dedicated=False):
     )
 
 
-def packet(camera="a", frame_time=1000.0, ids=("track",)):
+def packet(camera="a", frame_time=1000.0, ids=("track",), observed_at=None):
+    """A detection packet whose tracks the model measured on that frame.
+
+    `observed_at` overrides that: an older value is a box the tracker carried
+    onto this frame rather than one measured on it.
+    """
     objects = [
         {
             "id": track,
             "camera": camera,
             "frame_time": frame_time,
+            "detector_observed_at": frame_time if observed_at is None else observed_at,
             "label": "car",
             "false_positive": False,
             "end_time": None,
@@ -67,6 +73,12 @@ class TestCurrentLprScheduling(unittest.TestCase):
         self.processor = MagicMock(spec=LicensePlateRealTimeProcessor)
         self.processor.lp_objects = ["car"]
         self.processor.stationary_scan_duration = 5
+        # Candidate selection is where the attempt clocks are stamped, so it
+        # asks the real region-availability rule rather than a stub: a track
+        # that could not be read must not spend the slot.
+        rule = LicensePlateProcessingMixin.__new__(LicensePlateProcessingMixin)
+        rule.config = self.owner.config
+        self.processor.plate_region_available.side_effect = rule.plate_region_available
         self.owner.realtime_processors = [self.processor]
         self.owner.frame_manager = MagicMock()
         self.owner.frame_manager.get_captured_frame.return_value = np.zeros(
@@ -196,6 +208,7 @@ class TestCurrentLprScheduling(unittest.TestCase):
         self.processor.process_frame.assert_not_called()
 
     def test_stationary_ocr_keeps_refreshing_at_two_second_cadence(self):
+        """A stationary vehicle the detector keeps re-measuring is unaffected."""
         for index in range(21):
             self.tick = index * 0.5
             self.now = 1000 + self.tick
@@ -207,6 +220,117 @@ class TestCurrentLprScheduling(unittest.TestCase):
             for call in self.processor.process_frame.call_args_list
         ]
         self.assertEqual(samples, [1000, 1002, 1004, 1006, 1008, 1010])
+
+    def test_a_carried_box_is_not_selected_and_spends_no_budget(self):
+        """Rejecting only inside lpr_process would burn the slot here."""
+        self.run_packet(packet(observed_at=990.0))
+
+        self.processor.process_frame.assert_not_called()
+        self.owner.frame_manager.get_captured_frame.assert_not_called()
+        self.assertEqual(self.owner._last_lpr_attempt, -math.inf)
+        self.assertEqual(self.owner._lpr_camera_attempt, {})
+        self.assertEqual(self.owner._lpr_track_attempt, {})
+
+    def test_a_carried_track_never_starves_a_freshly_measured_one(self):
+        value = packet(ids=("carried", "measured"))
+        value[3][0]["detector_observed_at"] = 990.0
+        self.run_packet(value)
+
+        self.processor.process_frame.assert_called_once()
+        self.assertEqual(
+            self.processor.process_frame.call_args.args[0]["id"], "measured"
+        )
+
+    def test_a_carried_box_with_a_region_measured_here_is_still_selected(self):
+        """The plate region is its own evidence; the parent need not be fresh."""
+        value = packet(observed_at=990.0)
+        value[3][0]["current_attributes"] = [
+            {
+                "label": "license_plate",
+                "score": 0.9,
+                "box": [4, 4, 12, 8],
+                "detector_observed_at": 1000.0,
+            }
+        ]
+        self.run_packet(value)
+
+        self.processor.process_frame.assert_called_once()
+
+    def test_a_region_too_small_to_read_spends_no_clocks_on_a_carried_box(self):
+        """Available has to mean readable: min_area is the processor's rule too."""
+        self.owner.config.cameras["a"].lpr.min_area = 100
+        value = packet(observed_at=990.0)
+        value[3][0]["current_attributes"] = [
+            {
+                "label": "license_plate",
+                "score": 0.9,
+                # 40px^2, below min_area, so the processor would discard it and
+                # then refuse the fallback for the carried box.
+                "box": [4, 4, 14, 8],
+                "detector_observed_at": 1000.0,
+            }
+        ]
+        self.run_packet(value)
+
+        self.processor.process_frame.assert_not_called()
+        self.assertEqual(self.owner._last_lpr_attempt, -math.inf)
+        self.assertEqual(self.owner._lpr_camera_attempt, {})
+        self.assertEqual(self.owner._lpr_track_attempt, {})
+
+    def test_an_undersized_region_still_lets_the_next_fresh_parent_be_read(self):
+        """The unreadable frames must not block the frame that can be read."""
+        self.owner.config.cameras["a"].lpr.min_area = 100
+        tiny = [
+            {
+                "label": "license_plate",
+                "score": 0.9,
+                "box": [4, 4, 14, 8],
+                "detector_observed_at": None,
+            }
+        ]
+        fresh_at = 1000.7
+        for index in range(10):
+            self.tick = index * 0.1
+            self.now = round(1000 + self.tick, 1)
+            value = packet(
+                frame_time=self.now,
+                observed_at=self.now if self.now == fresh_at else 990.0,
+            )
+            value[3][0].update(stationary=True, motionless_count=300 + index)
+            value[3][0]["current_attributes"] = [
+                {**tiny[0], "detector_observed_at": self.now}
+            ]
+            self.run_packet(value)
+
+        samples = [
+            call.kwargs["source_frame_time"]
+            for call in self.processor.process_frame.call_args_list
+        ]
+        self.assertEqual(samples, [fresh_at])
+
+    def test_the_periodic_fresh_frame_is_reached_despite_phase_alignment(self):
+        """The detector confirms a stationary vehicle only every Nth frame.
+
+        Those confirmations are not aligned with the OCR cadence, so if the
+        stale frames in between consumed the camera and track spacing the fresh
+        one could be missed indefinitely. They must cost nothing.
+        """
+        fresh_at = 1000.7
+        for index in range(10):
+            self.tick = index * 0.1
+            self.now = round(1000 + self.tick, 1)
+            value = packet(
+                frame_time=self.now,
+                observed_at=self.now if self.now == fresh_at else 990.0,
+            )
+            value[3][0].update(stationary=True, motionless_count=300 + index)
+            self.run_packet(value)
+
+        samples = [
+            call.kwargs["source_frame_time"]
+            for call in self.processor.process_frame.call_args_list
+        ]
+        self.assertEqual(samples, [fresh_at])
 
 
 class TestLprSamplePair(unittest.TestCase):
@@ -271,15 +395,28 @@ class TestLprSamplePair(unittest.TestCase):
         )
 
     def test_old_cluster_representative_cannot_borrow_new_clock(self):
+        """Clustering may keep preferring an older reading; it may not speak as one.
+
+        The newer reading is published as itself - its own text, its own score,
+        its own capture time - so the representative ABC123 never appears
+        wearing the 101.0 clock that belongs to ABC128.
+        """
         self.sample("ABC123", 0.99, 100.0)
         self.processor.sub_label_publisher.reset_mock()
         self.sample("ABC128", 0.80, 101.0)
-        self.processor.sub_label_publisher.publish.assert_not_called()
+        published = self.processor.sub_label_publisher.publish.call_args.args[0]
+        self.assertEqual(published[:3], ("track", "recognized_license_plate", "ABC128"))
+        self.assertAlmostEqual(published[3], 0.80)
+        self.assertEqual(published[4], 101.0)
+        # Clustering really did disagree, so this is the borrowing case.
+        self.assertEqual(
+            self.processor.detected_license_plates["track"]["plate"], "ABC123"
+        )
         self.assertEqual(
             self.processor.detected_license_plates["track"][
                 "recognized_license_plate_frame_time"
             ],
-            100.0,
+            101.0,
         )
 
     def test_failed_or_duplicate_sample_never_refreshes_the_previous_pair(self):

@@ -30,14 +30,26 @@ class TestLprSampleMetadata(unittest.TestCase):
             EVENT_ID, PLATE_FIELD, text, score, source_frame_time=clock
         )
 
+    def publications(self):
+        """Every event published so far, oldest first.
+
+        A live track publishes on its own cadence, so a test that reasons about
+        what an OCR sample did to the event stream must read every publication
+        it produced rather than assume there was exactly one.
+        """
+        calls = self.processor.dispatcher.publish.call_args_list
+        self.assertTrue(calls, "expected at least one event publication")
+        events = []
+        for call in calls:
+            topic, payload = call.args
+            self.assertEqual(topic, "events")
+            self.assertEqual(call.kwargs, {"retain": False})
+            events.append(json.loads(payload))
+        return events
+
     def published(self):
         self.processor.dispatcher.publish.assert_called_once()
-        topic, payload = self.processor.dispatcher.publish.call_args.args
-        self.assertEqual(topic, "events")
-        self.assertEqual(
-            self.processor.dispatcher.publish.call_args.kwargs, {"retain": False}
-        )
-        return json.loads(payload)
+        return self.publications()[0]
 
     def test_sample_at_track_start_updates_plate_and_clock_in_one_publication(self):
         clock = self.obj.obj_data["start_time"]
@@ -61,13 +73,22 @@ class TestLprSampleMetadata(unittest.TestCase):
         second_clock = self.obj.obj_data["frame_time"]
         self.sample(second_clock)
         self.fixture.next_frame()
-        event = self.published()
+        event = self.publications()[0]
         self.assertEqual(event["before"][PLATE_FIELD], event["after"][PLATE_FIELD])
         self.assertEqual(event["before"][CLOCK_FIELD], first_clock)
         self.assertEqual(event["after"][CLOCK_FIELD], second_clock)
         self.fixture.next_frame()
         self.fixture.next_frame()
-        self.processor.dispatcher.publish.assert_called_once()
+        # The sample moved the OCR clock in exactly one publication. The track's
+        # own later publications carry it forward unchanged on both sides.
+        events = self.publications()
+        self.assertEqual(
+            [e for e in events if e["before"][CLOCK_FIELD] != e["after"][CLOCK_FIELD]],
+            [event],
+        )
+        for later in events[1:]:
+            self.assertEqual(later["before"][CLOCK_FIELD], second_clock)
+            self.assertEqual(later["after"][CLOCK_FIELD], second_clock)
         self.assertEqual(self.obj.obj_data[CLOCK_FIELD], second_clock)
 
     def test_invalid_duplicate_and_regressing_samples_leave_track_and_event_unchanged(
@@ -156,10 +177,13 @@ class TestLprSampleMetadata(unittest.TestCase):
         self.fixture.frame_time += 61
         self.fixture.next_frame()
         self.fixture.next_frame()
-        event = self.published()
-        self.assertGreater(event["after"]["frame_time"], clock + 60)
-        self.assertEqual(event["before"][CLOCK_FIELD], clock)
-        self.assertEqual(event["after"][CLOCK_FIELD], clock)
+        events = self.publications()
+        self.assertGreater(events[-1]["after"]["frame_time"], clock + 60)
+        # However many times the tracker publishes, none of those publications
+        # is an OCR sample, so none of them may move the OCR sample clock.
+        for event in events:
+            self.assertEqual(event["before"][CLOCK_FIELD], clock)
+            self.assertEqual(event["after"][CLOCK_FIELD], clock)
         self.assertEqual(self.obj.to_dict()[CLOCK_FIELD], clock)
 
     def test_dedicated_event_uses_nullable_end_and_json_instance_values(self):

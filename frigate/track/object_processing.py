@@ -813,6 +813,7 @@ class TrackedObjectProcessor(threading.Thread):
                     motion_boxes,
                     regions,
                     occupancy,
+                    face_regions,
                 ) = self.tracked_objects_queue.get(True, 1)
             except queue.Empty:
                 continue
@@ -830,7 +831,12 @@ class TrackedObjectProcessor(threading.Thread):
                 continue
 
             camera_state.update(
-                frame_name, frame_time, current_tracked_objects, motion_boxes, regions
+                frame_name,
+                frame_time,
+                current_tracked_objects,
+                motion_boxes,
+                regions,
+                face_regions,
             )
 
             if occupancy is not None:

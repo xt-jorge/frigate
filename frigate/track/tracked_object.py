@@ -586,13 +586,19 @@ def zone_filtered(obj: TrackedObject, object_config: dict[str, FilterConfig]) ->
 
 
 class TrackedObjectAttribute:
-    def __init__(self, raw_data: tuple) -> None:
+    def __init__(
+        self, raw_data: tuple, detector_observed_at: float | None = None
+    ) -> None:
         self.label = raw_data[0]
         self.score = raw_data[1]
         self.box = raw_data[2]
         self.area = raw_data[3]
         self.ratio = raw_data[4]
         self.region = raw_data[5]
+        # When the model actually measured this region. Without it a consumer
+        # cannot tell a plate read off these pixels from one carried forward on
+        # a stationary track, because both arrive on the current frame.
+        self.detector_observed_at = detector_observed_at
 
     def get_tracking_data(self) -> dict[str, Any]:
         """Return data saved to the object."""
@@ -600,6 +606,7 @@ class TrackedObjectAttribute:
             "label": self.label,
             "score": self.score,
             "box": self.box,
+            "detector_observed_at": self.detector_observed_at,
         }
 
     def find_best_object(self, objects: list[dict[str, Any]]) -> Optional[str]:

@@ -31,6 +31,10 @@ from frigate.util.file import get_event_thumbnail_bytes
 from .genai_embedding import GenAIEmbedding
 from .onnx.jina_v1_embedding import JinaV1ImageEmbedding, JinaV1TextEmbedding
 from .onnx.jina_v2_embedding import JinaV2Embedding
+from .onnx.lpr_embedding import (
+    PPOCRV6_MEDIUM_CONFIG_FILE,
+    PPOCRV6_MEDIUM_MODEL_FILE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +191,11 @@ class Embeddings:
                 "facenet-facenet.onnx",
                 "paddleocr-onnx-detection.onnx",
                 "paddleocr-onnx-classification.onnx",
-                "paddleocr-onnx-recognition.onnx",
+                # These must match what ModelDownloader reports for each file,
+                # i.e. f"{model_name}-{file_name}", or the seeded entry never
+                # resolves out of "not downloaded" in the UI.
+                f"paddleocr-onnx-{PPOCRV6_MEDIUM_MODEL_FILE}",
+                f"paddleocr-onnx-{PPOCRV6_MEDIUM_CONFIG_FILE}",
             ]
         )
 

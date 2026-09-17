@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 from pyclipper import ET_CLOSEDPOLYGON, JT_ROUND, PyclipperOffset
 from rapidfuzz.distance import JaroWinkler, Levenshtein
+from ruamel.yaml import YAML, YAMLError
 from shapely.geometry import Polygon
 
 from frigate.comms.event_metadata_updater import (
@@ -27,7 +28,11 @@ from frigate.config import FrigateConfig
 from frigate.config.classification import LicensePlateRecognitionConfig
 from frigate.const import CLIPS_DIR, MODEL_CACHE_DIR
 from frigate.data_processing.common.license_plate.model import LicensePlateModelRunner
-from frigate.embeddings.onnx.lpr_embedding import LPR_EMBEDDING_SIZE
+from frigate.embeddings.onnx.lpr_embedding import (
+    LPR_EMBEDDING_SIZE,
+    PPOCRV6_MEDIUM_CLASS_COUNT,
+    PPOCRV6_MEDIUM_CONFIG_FILE,
+)
 from frigate.types import TrackedObjectUpdateTypesEnum
 from frigate.util.builtin import EventsPerSecond, InferenceSpeed
 from frigate.util.image import area
@@ -61,8 +66,9 @@ class LicensePlateProcessingMixin:
         self.event_metadata_publisher = EventMetadataPublisher()
         self.ctc_decoder = CTCDecoder(
             character_dict_path=os.path.join(
-                MODEL_CACHE_DIR, "paddleocr-onnx", "ppocr_keys_v1.txt"
-            )
+                MODEL_CACHE_DIR, "paddleocr-onnx", PPOCRV6_MEDIUM_CONFIG_FILE
+            ),
+            expected_class_count=PPOCRV6_MEDIUM_CLASS_COUNT,
         )
         self.batch_size = 6
 
@@ -885,7 +891,7 @@ class LicensePlateProcessingMixin:
         to fit the required input dimensions for recognition.
 
         Args:
-            image (np.ndarray): Input image to preprocess.
+            image (np.ndarray): Input BGR plate crop to preprocess.
             max_wh_ratio (float): Maximum width-to-height ratio for resizing.
 
         Returns:
@@ -897,47 +903,44 @@ class LicensePlateProcessingMixin:
 
         assert image.shape[2] == input_shape[0], "Unexpected number of image channels."
 
-        # convert to grayscale
-        if image.shape[2] == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image
+        enhancement = self.config.cameras[camera].lpr.enhancement
 
-        if self.config.cameras[camera].lpr.enhancement > 3:
-            # denoise using a configurable pixel neighborhood value
-            logger.debug(
-                f"{camera}: Denoising recognition image (level: {self.config.cameras[camera].lpr.enhancement})"
-            )
-            smoothed = cv2.bilateralFilter(
-                gray,
-                d=5 + self.config.cameras[camera].lpr.enhancement,
-                sigmaColor=10 * self.config.cameras[camera].lpr.enhancement,
-                sigmaSpace=10 * self.config.cameras[camera].lpr.enhancement,
-            )
-            sharpening_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
-            processed = cv2.filter2D(smoothed, -1, sharpening_kernel)
-        else:
-            processed = gray
+        if enhancement > 0:
+            # The denoise/CLAHE operators below are single-channel, so this
+            # branch pays a colour round trip to get them. It applies only when
+            # an operator has asked for enhancement.
+            processed = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        if self.config.cameras[camera].lpr.enhancement > 0:
-            # always apply the same CLAHE for contrast enhancement when enhancement level is above 3
+            if enhancement > 3:
+                # denoise using a configurable pixel neighborhood value
+                logger.debug(
+                    f"{camera}: Denoising recognition image (level: {enhancement})"
+                )
+                smoothed = cv2.bilateralFilter(
+                    processed,
+                    d=5 + enhancement,
+                    sigmaColor=10 * enhancement,
+                    sigmaSpace=10 * enhancement,
+                )
+                sharpening_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+                processed = cv2.filter2D(smoothed, -1, sharpening_kernel)
+
             logger.debug(
-                f"{camera}: Enhancing contrast for recognition image (level: {self.config.cameras[camera].lpr.enhancement})"
+                f"{camera}: Enhancing contrast for recognition image (level: {enhancement})"
             )
             grid_size = (
                 max(4, input_w // 40),
                 max(4, input_h // 40),
             )
             clahe = cv2.createCLAHE(
-                clipLimit=2 if self.config.cameras[camera].lpr.enhancement > 5 else 1.5,
+                clipLimit=2 if enhancement > 5 else 1.5,
                 tileGridSize=grid_size,
             )
-            enhanced = clahe.apply(processed)
-        else:
-            enhanced = processed
+            image = cv2.cvtColor(clahe.apply(processed), cv2.COLOR_GRAY2BGR)
 
-        # Convert back to 3-channel for model compatibility
-        image = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
+        # With no enhancement requested the crop reaches the recognizer as the
+        # BGR data `lpr_process` decoded, which is the colour input PaddleOCR
+        # text recognition is trained and exported for.
 
         # dynamically adjust input width based on max_wh_ratio
         input_w = int(input_h * max_wh_ratio)
@@ -955,11 +958,11 @@ class LicensePlateProcessingMixin:
         resized_image = resized_image.transpose((2, 0, 1))
         resized_image = (resized_image.astype("float32") / 255.0 - 0.5) / 0.5
 
-        # Compute mean pixel value of the resized image (per channel)
-        mean_pixel = np.mean(resized_image, axis=(1, 2), keepdims=True)
-        padded_image = np.full(
-            (input_shape[0], input_h, input_w), mean_pixel, dtype=np.float32
-        )
+        # Official PaddleOCR RecResizeImg pads with zeros, which after the
+        # (x/255 - 0.5)/0.5 normalization above is mid-gray in pixel space.
+        # Padding with the crop's mean instead feeds the recognizer a trailing
+        # block the model never saw in training.
+        padded_image = np.zeros((input_shape[0], input_h, input_w), dtype=np.float32)
         padded_image[:, :, :resized_w] = resized_image
 
         if False:
@@ -1167,6 +1170,260 @@ class LicensePlateProcessingMixin:
 
         return rep["plate"], rep["conf"], rep["char_confidences"], rep["area"]
 
+    def _passes_plate_filters(self, camera: str, plate: str, kind: str) -> bool:
+        """Check a plate string against the configured length and format filters.
+
+        Args:
+            camera: Camera the reading came from, for logging.
+            plate: The text to check.
+            kind: What the text is ("clustered" aggregate or "recognized"
+                current sample), for logging.
+
+        Returns:
+            Whether the text may be used for its purpose. An invalid `format`
+            regex is a configuration error, not a rejection, so it is logged and
+            the text passes - matching the previous behaviour.
+        """
+        if len(plate) < self.lpr_config.min_plate_length:
+            logger.debug(
+                f"{camera}: Filtered out {kind} plate '{plate}' due to length ({len(plate)} < {self.lpr_config.min_plate_length})"
+            )
+            return False
+
+        if self.lpr_config.format:
+            try:
+                if not re.fullmatch(self.lpr_config.format, plate):
+                    logger.debug(
+                        f"{camera}: Filtered out {kind} plate '{plate}' due to format mismatch"
+                    )
+                    return False
+            except re.error:
+                logger.error(
+                    f"{camera}: Invalid regex in LPR format configuration: {self.lpr_config.format}"
+                )
+
+        return True
+
+    def _current_plate_attribute(
+        self, camera: str, obj_data: dict[str, Any], source_frame_time: float | None
+    ) -> dict[str, Any] | None:
+        """Return the best license plate region the model measured on this frame.
+
+        Args:
+            camera: Camera the track belongs to, for logging.
+            obj_data: The tracked object, carrying its `current_attributes`.
+            source_frame_time: Clock of the frame the crop will come from, or
+                None when the caller has re-projected the regions onto an image
+                no detector ran on and vouches for the correspondence itself.
+
+        Returns:
+            The highest scoring `license_plate` attribute whose own detector
+            observation clock is exactly this frame's, or None.
+
+        A track carries its attributes across frames, so `current_attributes`
+        on its own says only that this track has a plate somewhere - not that
+        the plate is in these pixels. Pairing a region measured on an earlier
+        frame with a newer crop reads whatever has since moved into that box.
+        """
+        best: dict[str, Any] | None = None
+
+        for attr in obj_data.get("current_attributes") or []:
+            if attr.get("label") != "license_plate":
+                continue
+
+            if (
+                source_frame_time is not None
+                and attr.get("detector_observed_at") != source_frame_time
+            ):
+                logger.debug(
+                    f"{camera}: Ignoring license plate region observed at {attr.get('detector_observed_at')}, not {source_frame_time}"
+                )
+                continue
+
+            if best is None or attr.get("score", 0.0) > best.get("score", 0.0):
+                best = attr
+
+        return best
+
+    @staticmethod
+    def _vehicle_measured_on_frame(
+        obj_data: dict[str, Any], source_frame_time: float
+    ) -> bool:
+        """Whether the model measured this track's own box on exactly this frame.
+
+        The tracker advances a track's `frame_time` onto every frame it is
+        assumed to still be present on, while deliberately preserving the older
+        `detector_observed_at` of the measurement the box actually came from
+        (`NorfairTracker.update_frame_times`). So `frame_time` says "believed
+        present", and only `detector_observed_at` says "measured here".
+
+        Compared raw, before any rounding: two different measurements can round
+        to the same millisecond, and a missing or non-numeric clock is refused
+        rather than treated as current.
+        """
+        observed = obj_data.get("detector_observed_at")
+
+        return (
+            isinstance(observed, (int, float))
+            and not isinstance(observed, bool)
+            and observed == source_frame_time
+        )
+
+    def _usable_plate_box(
+        self, camera: str, region: dict[str, Any] | None
+    ) -> Any | None:
+        """Return this region's box when it is large enough to be worth reading.
+
+        The one place `min_area` is applied to a reported region, so the
+        scheduler's view of what a frame can yield and the processor's decision
+        about what to read cannot drift apart.
+        """
+        box = region.get("box") if region is not None else None
+
+        if not box:
+            return None
+
+        if area(box) < self.config.cameras[camera].lpr.min_area:
+            logger.debug(
+                f"{camera}: Area for license plate box {area(box)} is less than min_area {self.config.cameras[camera].lpr.min_area}"
+            )
+            return None
+
+        return box
+
+    def plate_region_available(
+        self, camera: str, obj_data: dict[str, Any], source_frame_time: float
+    ) -> bool:
+        """Whether this track can yield a plate region from this exact frame.
+
+        Args:
+            camera: Camera the track belongs to.
+            obj_data: The tracked object being considered.
+            source_frame_time: Clock of the frame that would be sampled.
+
+        Returns:
+            Whether an attempt on this frame could produce a region whose
+            geometry the model measured on this frame.
+
+        The scheduler asks this before it selects a candidate and spends the
+        one OCR slot, and `lpr_process` asks it again before it acts. Keeping
+        both on this single rule is what stops a track from repeatedly
+        consuming the budget on frames it can never be read from - the periodic
+        fresh-parent frame would otherwise be missed on phase alignment alone.
+        """
+        # A dedicated Frigate+ LPR camera tracks the plate itself, and a camera
+        # with no plate-detecting model has only ever had the secondary locator.
+        # Both are pre-existing paths whose geometry handling is unchanged here,
+        # and on both the processor acts on exactly what it is given, so there
+        # is nothing here for the scheduler's view to disagree with.
+        if obj_data.get("label") == "license_plate":
+            return True
+
+        if "license_plate" not in self.config.cameras[camera].objects.track:
+            return True
+
+        # Plus vehicle: either a plate region the processor would actually read
+        # from this frame, or a vehicle box measured on this frame to look
+        # inside. A region too small to read is not one the processor would use,
+        # so counting it here would spend the slot and then discard it - and a
+        # carried box would then attach whatever plate is now in those pixels to
+        # this track on geometry the model never confirmed for this image.
+        return self._usable_plate_box(
+            camera, self._current_plate_attribute(camera, obj_data, source_frame_time)
+        ) is not None or self._vehicle_measured_on_frame(obj_data, source_frame_time)
+
+    def _locate_plate_in_vehicle(
+        self,
+        camera: str,
+        obj_data: dict[str, Any],
+        frame: np.ndarray,
+        current_time: float,
+    ) -> tuple[np.ndarray, tuple[int, int, int, int]] | None:
+        """Look for a plate inside this frame's crop of this vehicle.
+
+        Args:
+            camera: Camera the track belongs to.
+            obj_data: The tracked vehicle whose box selects the crop.
+            frame: The YUV frame the OCR attempt is about.
+            current_time: Wall clock, used only to name debug images.
+
+        Returns:
+            The plate crop and its box in frame coordinates, or None when the
+            crop holds no usable plate.
+
+        This reads the frame in hand through the box this track currently
+        carries. Finding a plate in those pixels establishes a plate region on
+        this frame; it does **not** establish that the box still frames this
+        track's vehicle. A tracker advances a carried box onto new frames, so a
+        caller that turns the result into a new plate-to-track association owes
+        that check itself - see `_vehicle_measured_on_frame`.
+        """
+        car_box = obj_data.get("box")
+
+        if not car_box:
+            return None
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+
+        # apply motion mask
+        rgb[self.config.cameras[camera].motion.rasterized_mask == 0] = [0, 0, 0]  # type: ignore[attr-defined]
+
+        left, top, right, bottom = (int(value) for value in car_box)
+        car = rgb[top:bottom, left:right]
+
+        if car.size == 0:
+            logger.debug(f"{camera}: Vehicle box {car_box} selects no pixels")
+            return None
+
+        # double the size of the car for better box detection
+        car = cv2.resize(car, (int(2 * car.shape[1]), int(2 * car.shape[0])))
+
+        if WRITE_DEBUG_IMAGES:
+            cv2.imwrite(
+                f"debug/frames/car_frame_{current_time}.jpg",
+                car,
+            )
+
+        yolov9_start = datetime.datetime.now().timestamp()
+        license_plate = self._detect_license_plate(camera, car)
+        logger.debug(
+            f"{camera}: YOLOv9 LPD inference time: {(datetime.datetime.now().timestamp() - yolov9_start) * 1000:.2f} ms"
+        )
+        self.plates_det_second.update()
+        self.plate_det_speed.update(datetime.datetime.now().timestamp() - yolov9_start)
+
+        if not license_plate:
+            logger.debug(f"{camera}: Detected no license plates for vehicle object.")
+            return None
+
+        license_plate_area = max(
+            0,
+            (license_plate[2] - license_plate[0])
+            * (license_plate[3] - license_plate[1]),
+        )
+
+        # check that license plate is valid
+        # quadruple the value because we've doubled both dimensions of the car
+        if license_plate_area < self.config.cameras[camera].lpr.min_area * 4:
+            logger.debug(f"{camera}: License plate is less than min_area")
+            return None
+
+        # Scale back to original car coordinates and then to frame
+        plate_box = (
+            left + license_plate[0] // 2,
+            top + license_plate[1] // 2,
+            left + license_plate[2] // 2,
+            top + license_plate[3] // 2,
+        )
+
+        return (
+            car[
+                license_plate[1] : license_plate[3],
+                license_plate[0] : license_plate[2],
+            ],
+            plate_box,
+        )
+
     def _generate_plate_event(
         self, camera: str, plate: str, plate_score: float, source_frame_time: float
     ) -> str:
@@ -1197,8 +1454,19 @@ class LicensePlateProcessingMixin:
         dedicated_lpr: bool = False,
         *,
         source_frame_time: float,
+        reprojected_regions: bool = False,
     ) -> None:
-        """Look for license plates in image."""
+        """Look for license plates in image.
+
+        Args:
+            reprojected_regions: Whether the caller has already mapped this
+                object's regions onto these exact pixels. The post processor
+                does that when it re-reads a plate from a recording keyframe,
+                so its regions belong to the image even though no detector ran
+                on it. Nothing else may claim this: it turns off both the
+                same-frame check and the secondary fallback, whose vehicle box
+                would be in the wrong coordinate space on a re-projected image.
+        """
         self.metrics.alpr_pps.value = self.plates_rec_second.eps()
         self.metrics.yolov9_lpr_pps.value = self.plates_det_second.eps()
         camera = obj_data["camera"]
@@ -1292,122 +1560,31 @@ class LicensePlateProcessingMixin:
                 )
                 return
 
-            license_plate = None
+            plate_region: dict[str, Any] | None = None
+            located: tuple[np.ndarray, tuple[int, int, int, int]] | None = None
 
             if "license_plate" not in self.config.cameras[camera].objects.track:
                 logger.debug(f"{camera}: Running manual license_plate detection.")
-
-                car_box = obj_data.get("box")
-
-                if not car_box:
+                located = self._locate_plate_in_vehicle(
+                    camera, obj_data, frame, current_time
+                )
+                if located is None:
                     return
-
-                rgb = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-
-                # apply motion mask
-                rgb[self.config.cameras[camera].motion.rasterized_mask == 0] = [0, 0, 0]  # type: ignore[attr-defined]
-
-                left, top, right, bottom = car_box
-                car = rgb[top:bottom, left:right]
-
-                # double the size of the car for better box detection
-                car = cv2.resize(car, (int(2 * car.shape[1]), int(2 * car.shape[0])))
-
-                if WRITE_DEBUG_IMAGES:
-                    cv2.imwrite(
-                        f"debug/frames/car_frame_{current_time}.jpg",
-                        car,
-                    )
-
-                yolov9_start = datetime.datetime.now().timestamp()
-                license_plate = self._detect_license_plate(camera, car)
-                logger.debug(
-                    f"{camera}: YOLOv9 LPD inference time: {(datetime.datetime.now().timestamp() - yolov9_start) * 1000:.2f} ms"
-                )
-                self.plates_det_second.update()
-                self.plate_det_speed.update(
-                    datetime.datetime.now().timestamp() - yolov9_start
-                )
-
-                if not license_plate:
-                    logger.debug(
-                        f"{camera}: Detected no license plates for car/motorcycle object."
-                    )
-                    return
-
-                license_plate_area = max(
-                    0,
-                    (license_plate[2] - license_plate[0])
-                    * (license_plate[3] - license_plate[1]),
-                )
-
-                # check that license plate is valid
-                # quadruple the value because we've doubled both dimensions of the car
-                if license_plate_area < self.config.cameras[camera].lpr.min_area * 4:
-                    logger.debug(f"{camera}: License plate is less than min_area")
-                    return
-
-                # Scale back to original car coordinates and then to frame
-                plate_box_in_car = (
-                    license_plate[0] // 2,
-                    license_plate[1] // 2,
-                    license_plate[2] // 2,
-                    license_plate[3] // 2,
-                )
-                plate_box = (
-                    left + plate_box_in_car[0],
-                    top + plate_box_in_car[1],
-                    left + plate_box_in_car[2],
-                    top + plate_box_in_car[3],
-                )
-
-                license_plate_frame = car[
-                    license_plate[1] : license_plate[3],
-                    license_plate[0] : license_plate[2],
-                ]
+            elif obj_data.get("label") == "license_plate":
+                # dedicated lpr with frigate+: the plate is the tracked object
+                plate_region = obj_data
             else:
-                # don't run for object without attributes if this isn't dedicated lpr with frigate+
-                if (
-                    not obj_data.get("current_attributes")
-                    and obj_data.get("label") != "license_plate"
-                ):
-                    logger.debug(f"{camera}: No attributes to parse.")
-                    return
+                plate_region = self._current_plate_attribute(
+                    camera,
+                    obj_data,
+                    None if reprojected_regions else source_frame_time,
+                )
 
-                if obj_data.get("label") in self.lp_objects:
-                    attributes: list[dict[str, Any]] = obj_data.get(
-                        "current_attributes", []
-                    )
-                    for attr in attributes:
-                        if attr.get("label") != "license_plate":
-                            continue
+            # The same check the scheduler used to decide this frame was worth
+            # a slot, so the two can never disagree about what is readable.
+            license_plate_box = self._usable_plate_box(camera, plate_region)
 
-                        if license_plate is None or attr.get(  # type: ignore[unreachable]
-                            "score", 0.0
-                        ) > license_plate.get("score", 0.0):
-                            license_plate = attr  # type: ignore[assignment]
-
-                    # no license plates detected in this frame
-                    if not license_plate:
-                        return
-
-                # we are using dedicated lpr with frigate+
-                if obj_data.get("label") == "license_plate":
-                    license_plate = obj_data  # type: ignore[assignment]
-
-                license_plate_box = license_plate.get("box")  # type: ignore[attr-defined]
-
-                # check that license plate is valid
-                if (
-                    not license_plate_box
-                    or area(license_plate_box)
-                    < self.config.cameras[camera].lpr.min_area
-                ):
-                    logger.debug(
-                        f"{camera}: Area for license plate box {area(license_plate_box)} is less than min_area {self.config.cameras[camera].lpr.min_area}"
-                    )
-                    return
-
+            if license_plate_box:
                 license_plate_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
 
                 # Expand the license_plate_box by 10%
@@ -1424,13 +1601,50 @@ class LicensePlateProcessingMixin:
                     0, [license_plate_frame.shape[1], license_plate_frame.shape[0]] * 2
                 )
 
-                plate_box = tuple(int(x) for x in expanded_box)  # type: ignore[assignment]
+                plate_box = (
+                    int(expanded_box[0]),
+                    int(expanded_box[1]),
+                    int(expanded_box[2]),
+                    int(expanded_box[3]),
+                )
 
                 # Crop using the expanded box
                 license_plate_frame = license_plate_frame[
                     int(expanded_box[1]) : int(expanded_box[3]),
                     int(expanded_box[0]) : int(expanded_box[2]),
                 ]
+            else:
+                if located is None:
+                    # The model published no plate region it measured on this
+                    # frame, so look once inside the vehicle instead - but only
+                    # when the model measured this vehicle here too. Reading a
+                    # carried box would publish whatever plate has since moved
+                    # into it under this track's identity, which in close
+                    # headway is the next car's. A plate that is itself the
+                    # tracked object has no vehicle to look inside, and a
+                    # re-projected image's vehicle box is in the coordinate
+                    # space of some other frame.
+                    if reprojected_regions or obj_data.get("label") not in (
+                        self.lp_objects
+                    ):
+                        return
+
+                    if not self._vehicle_measured_on_frame(obj_data, source_frame_time):
+                        logger.debug(
+                            f"{camera}: Skipping license plate fallback for {id}, vehicle last measured at {obj_data.get('detector_observed_at')}, not {source_frame_time}"
+                        )
+                        return
+
+                    logger.debug(
+                        f"{camera}: No current license_plate attribute, falling back to manual detection for {id}."
+                    )
+                    located = self._locate_plate_in_vehicle(
+                        camera, obj_data, frame, current_time
+                    )
+                    if located is None:
+                        return
+
+                license_plate_frame, plate_box = located
 
             # double the size of the license plate frame for better OCR
             license_plate_frame = cv2.resize(
@@ -1552,7 +1766,8 @@ class LicensePlateProcessingMixin:
                 id
             ]["plates"][-num_variants:]
 
-        # Cluster and select rep
+        # Cluster and select rep. Clustering produces the historical/display
+        # aggregate only - it never decides what gets published.
         plates = self.detected_license_plates[id]["plates"]
         rep_plate, rep_conf, rep_char_confs, rep_area = self._get_cluster_rep(plates)
 
@@ -1564,32 +1779,23 @@ class LicensePlateProcessingMixin:
         # Apply length and format filters to the clustered representative
         # rather than individual OCR readings, so noisy variants still
         # contribute to clustering even when they don't pass on their own.
-        if len(rep_plate) < self.lpr_config.min_plate_length:
-            logger.debug(
-                f"{camera}: Filtered out clustered plate '{rep_plate}' due to length ({len(rep_plate)} < {self.lpr_config.min_plate_length})"
+        if self._passes_plate_filters(camera, rep_plate, "clustered"):
+            self.detected_license_plates[id].update(
+                {
+                    "plate": rep_plate,
+                    "char_confidences": rep_char_confs,
+                    "area": rep_area,
+                }
             )
-            return
+        else:
+            # Keep the previous aggregate rather than storing a rejected one,
+            # while leaving every key present for later reads.
+            self.detected_license_plates[id].setdefault("plate", "")
+            self.detected_license_plates[id].setdefault("char_confidences", [])
+            self.detected_license_plates[id].setdefault("area", 0)
 
-        if self.lpr_config.format:
-            try:
-                if not re.fullmatch(self.lpr_config.format, rep_plate):
-                    logger.debug(
-                        f"{camera}: Filtered out clustered plate '{rep_plate}' due to format mismatch"
-                    )
-                    return
-            except re.error:
-                logger.error(
-                    f"{camera}: Invalid regex in LPR format configuration: {self.lpr_config.format}"
-                )
-
-        # Update stored rep
-        self.detected_license_plates[id].update(
-            {
-                "plate": rep_plate,
-                "char_confidences": rep_char_confs,
-                "area": rep_area,
-                "last_seen": current_time if dedicated_lpr else None,
-            }
+        self.detected_license_plates[id]["last_seen"] = (
+            current_time if dedicated_lpr else None
         )
 
         if not dedicated_lpr:
@@ -1600,19 +1806,26 @@ class LicensePlateProcessingMixin:
                 self.camera_current_cars[camera] = []
             self.camera_current_cars[camera].append(id)
 
-        # Historical clustering may select an older reading. Only an actual new
-        # sample of that same text can refresh its confidence/capture-time pair.
+        # Publication describes this sample, not the aggregate. The OCR sample
+        # clock only ever moves forward, and only on an actual accepted sample.
         previous_sample_time = self.detected_license_plates[id].get(
             "recognized_license_plate_frame_time", 0
         )
-        if rep_plate != top_plate or source_frame_time <= previous_sample_time:
+        if source_frame_time <= previous_sample_time:
             return
+
+        # The published text must pass the filters on its own merit; a passing
+        # aggregate never vouches for a sample that does not.
+        if not self._passes_plate_filters(camera, top_plate, "recognized"):
+            return
+
         self.detected_license_plates[id]["recognized_license_plate_frame_time"] = (
             source_frame_time
         )
 
-        # Determine subLabel based on known plates, use regex matching
-        # Default to the detected plate, use label name if there's a match
+        # Determine subLabel based on known plates, use regex matching.
+        # Matched against the published text, so the sub label describes what
+        # was published rather than some other reading of this track.
         sub_label = None
         try:
             sub_label = next(
@@ -1620,8 +1833,8 @@ class LicensePlateProcessingMixin:
                     label
                     for label, plates_list in self.lpr_config.known_plates.items()  # type: ignore[union-attr]
                     if any(
-                        re.match(f"^{plate}$", rep_plate)
-                        or Levenshtein.distance(plate, rep_plate)
+                        re.match(f"^{plate}$", top_plate)
+                        or Levenshtein.distance(plate, top_plate)
                         <= self.lpr_config.match_distance
                         for plate in plates_list
                     )
@@ -1639,14 +1852,15 @@ class LicensePlateProcessingMixin:
                 (id, sub_label, avg_confidence), EventMetadataTypeEnum.sub_label.value
             )
 
-        # Publish the confidence and capture time of this exact OCR sample.
+        # Publish the text, confidence and capture time of this exact OCR
+        # sample - one sample, one coherent triple.
         self.requestor.send_data(
             "tracked_object_update",
             json.dumps(
                 {
                     "type": TrackedObjectUpdateTypesEnum.lpr,
                     "name": sub_label,
-                    "plate": rep_plate,
+                    "plate": top_plate,
                     "score": avg_confidence,
                     "id": id,
                     "camera": camera,
@@ -1660,7 +1874,7 @@ class LicensePlateProcessingMixin:
             (
                 id,
                 "recognized_license_plate",
-                rep_plate,
+                top_plate,
                 avg_confidence,
                 source_frame_time,
             ),
@@ -1673,7 +1887,7 @@ class LicensePlateProcessingMixin:
             and "license_plate" not in self.config.cameras[camera].objects.track
         ):
             logger.debug(
-                f"{camera}: Writing snapshot for {id}, {rep_plate}, {current_time}"
+                f"{camera}: Writing snapshot for {id}, {top_plate}, {current_time}"
             )
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
             _, encoded_img = cv2.imencode(".jpg", frame_bgr)
@@ -1704,122 +1918,90 @@ class CTCDecoder:
     for each decoded character sequence.
     """
 
-    def __init__(self, character_dict_path: str | None = None) -> None:
+    def __init__(self, character_dict_path: str, expected_class_count: int) -> None:
+        """Initialize the decoder from the recognizer's own inference config.
+
+        Args:
+            character_dict_path: Path to the recognition model's official
+                `inference.yml`. Its `PostProcess.character_dict` is the ordered
+                label map the network was trained against.
+            expected_class_count: Number of classes the recognition model emits.
+
+        Raises:
+            FileNotFoundError: The inference config is missing.
+            ValueError: The config is unreadable, does not describe a CTC label
+                map, or yields a class count other than `expected_class_count`.
+
+        There is deliberately no built-in fallback list. A wrong label map does
+        not fail loudly at decode time - it silently emits the wrong glyph for
+        every index - so an unreadable dictionary must stop recognition instead.
         """
-        Initializes the CTCDecoder.
-        :param character_dict_path: Path to the character dictionary file.
-                                    If None, a default (English-focused) list is used.
-                                    For Chinese models, this should point to the correct
-                                    character dictionary file provided with the model.
-        """
-        self.characters = []
-        if character_dict_path and os.path.exists(character_dict_path):
-            with open(character_dict_path, "r", encoding="utf-8") as f:
-                self.characters = (
-                    ["blank"] + [line.strip() for line in f if line.strip()] + [" "]
-                )
-        else:
-            self.characters = [
-                "blank",
-                "0",
-                "1",
-                "2",
-                "3",
-                "4",
-                "5",
-                "6",
-                "7",
-                "8",
-                "9",
-                ":",
-                ";",
-                "<",
-                "=",
-                ">",
-                "?",
-                "@",
-                "A",
-                "B",
-                "C",
-                "D",
-                "E",
-                "F",
-                "G",
-                "H",
-                "I",
-                "J",
-                "K",
-                "L",
-                "M",
-                "N",
-                "O",
-                "P",
-                "Q",
-                "R",
-                "S",
-                "T",
-                "U",
-                "V",
-                "W",
-                "X",
-                "Y",
-                "Z",
-                "[",
-                "\\",
-                "]",
-                "^",
-                "_",
-                "`",
-                "a",
-                "b",
-                "c",
-                "d",
-                "e",
-                "f",
-                "g",
-                "h",
-                "i",
-                "j",
-                "k",
-                "l",
-                "m",
-                "n",
-                "o",
-                "p",
-                "q",
-                "r",
-                "s",
-                "t",
-                "u",
-                "v",
-                "w",
-                "x",
-                "y",
-                "z",
-                "{",
-                "|",
-                "}",
-                "~",
-                "!",
-                '"',
-                "#",
-                "$",
-                "%",
-                "&",
-                "'",
-                "(",
-                ")",
-                "*",
-                "+",
-                ",",
-                "-",
-                ".",
-                "/",
-                " ",
-                " ",
-            ]
+        self.characters = self._load_characters(character_dict_path)
+
+        if len(self.characters) != expected_class_count:
+            raise ValueError(
+                f"Recognition character dictionary at {character_dict_path} "
+                f"defines {len(self.characters)} classes but the model emits "
+                f"{expected_class_count}"
+            )
 
         self.char_map = {i: char for i, char in enumerate(self.characters)}
+
+    @staticmethod
+    def _load_characters(character_dict_path: str) -> list[str]:
+        """Read the ordered PaddleOCR label map out of an inference config.
+
+        Entries are taken verbatim and in order. `str.strip()` must never be
+        applied: the dictionary contains U+3000 IDEOGRAPHIC SPACE, which Python
+        treats as whitespace, and dropping it shifts every later index by one -
+        a corruption that still decodes Latin plates and so goes unnoticed.
+        """
+        if not os.path.exists(character_dict_path):
+            raise FileNotFoundError(
+                f"Recognition character dictionary not found at {character_dict_path}"
+            )
+
+        try:
+            with open(character_dict_path, "r", encoding="utf-8") as config_file:
+                config = YAML(typ="safe", pure=True).load(config_file)
+        except YAMLError as err:
+            raise ValueError(
+                f"Unable to parse recognition inference config at {character_dict_path}"
+            ) from err
+
+        post_process = (config or {}).get("PostProcess") or {}
+        character_dict = post_process.get("character_dict")
+
+        if post_process.get("name") != "CTCLabelDecode":
+            raise ValueError(
+                f"Recognition inference config at {character_dict_path} declares "
+                f"post process '{post_process.get('name')}', not CTCLabelDecode"
+            )
+
+        if not isinstance(character_dict, list) or not character_dict:
+            raise ValueError(
+                f"Recognition inference config at {character_dict_path} has no "
+                "PostProcess.character_dict label map"
+            )
+
+        # A line-based dictionary file cannot hold an empty entry or a line
+        # terminator, so either means the label map is not the one the model
+        # was trained against.
+        for index, entry in enumerate(character_dict):
+            if (
+                not isinstance(entry, str)
+                or not entry
+                or "\n" in entry
+                or "\r" in entry
+            ):
+                raise ValueError(
+                    f"Recognition inference config at {character_dict_path} has an "
+                    f"invalid label map entry at index {index}"
+                )
+
+        # PaddleOCR's CTCLabelDecode label order: the CTC blank, the dictionary
+        # verbatim, then the trailing space class.
+        return ["blank"] + list(character_dict) + [" "]
 
     def __call__(
         self, outputs: List[np.ndarray]
@@ -1842,6 +2024,17 @@ class CTCDecoder:
         results = []
         confidences = []
         for output in outputs:
+            if output.shape[-1] != len(self.characters):
+                # The loaded label map does not describe this model's output,
+                # so every index would decode to the wrong glyph. Recognize
+                # nothing rather than publish a confident wrong plate.
+                logger.error(
+                    "Recognition model emitted %d classes but the character dictionary defines %d",
+                    output.shape[-1],
+                    len(self.characters),
+                )
+                return [], []
+
             seq_log_probs = np.log(output + 1e-8)
             best_path = np.argmax(seq_log_probs, axis=1)
 

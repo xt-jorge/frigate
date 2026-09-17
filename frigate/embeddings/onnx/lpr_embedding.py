@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 LPR_EMBEDDING_SIZE = 256
 
+# Official PP-OCRv6 medium text recognizer, pinned to the exact HuggingFace
+# revision the edge image bakes. The revision hash is part of the URL: a branch
+# name would let the upstream artifact change under a cached file name.
+PPOCRV6_MEDIUM_REPOSITORY = "PaddlePaddle/PP-OCRv6_medium_rec_onnx"
+PPOCRV6_MEDIUM_REVISION = "50c7eacafc52fa7bcf4194e8cd08e46f8558504b"
+
+# Local cache names. They deliberately differ from the upstream file names so a
+# model_cache directory can never serve a different recognizer's inference.onnx,
+# and from any earlier recognizer so a stale cache entry cannot be reused.
+PPOCRV6_MEDIUM_MODEL_FILE = "recognition_ppocrv6_medium.onnx"
+PPOCRV6_MEDIUM_CONFIG_FILE = "recognition_ppocrv6_medium.yml"
+
+# Output classes the recognizer emits: the CTC blank, the 18708 ordered entries
+# of PostProcess.character_dict, and the trailing space class.
+PPOCRV6_MEDIUM_CLASS_COUNT = 18710
+
 
 class PaddleOCRDetection(BaseEmbedding):
     def __init__(
@@ -159,13 +175,20 @@ class PaddleOCRRecognition(BaseEmbedding):
         requestor: InterProcessRequestor,
         device: str = "AUTO",
     ):
-        GITHUB_ENDPOINT = os.environ.get("GITHUB_ENDPOINT", "https://github.com")
+        HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+        revision_url = (
+            f"{HF_ENDPOINT}/{PPOCRV6_MEDIUM_REPOSITORY}/resolve/"
+            f"{PPOCRV6_MEDIUM_REVISION}"
+        )
         super().__init__(
             model_name="paddleocr-onnx",
-            model_file="recognition_v4.onnx",
+            model_file=PPOCRV6_MEDIUM_MODEL_FILE,
             download_urls={
-                "recognition_v4.onnx": f"{GITHUB_ENDPOINT}/hawkeye217/paddleocr-onnx/raw/refs/heads/master/models/v4/recognition_v4.onnx",
-                "ppocr_keys_v1.txt": f"{GITHUB_ENDPOINT}/hawkeye217/paddleocr-onnx/raw/refs/heads/master/models/v4/ppocr_keys_v1.txt",
+                PPOCRV6_MEDIUM_MODEL_FILE: f"{revision_url}/inference.onnx",
+                # The recognizer's own inference config carries the ordered
+                # label map the network was trained against. Decoding without
+                # it is guesswork, so it is a required artifact, not an extra.
+                PPOCRV6_MEDIUM_CONFIG_FILE: f"{revision_url}/inference.yml",
             },
         )
         self.requestor = requestor

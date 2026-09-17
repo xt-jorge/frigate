@@ -25,6 +25,18 @@ REDACTED_CREDENTIAL_SENTINEL = "__FRIGATE_SAVED_CREDENTIAL__"
 
 # Attribute & Object constants
 
+# Every vehicle label a supported model can emit. Frigate+ has no generic
+# "truck" or "bus": it emits school_bus and garbage_truck as their own classes,
+# so any gate that names vehicles by hand has to name those two as well or the
+# tracks silently lose the behaviour the gate exists for.
+VEHICLE_LABELS = frozenset(
+    {"bus", "car", "garbage_truck", "motorcycle", "school_bus", "truck"}
+)
+
+# Labels a live track may bind detector pixels to. A vehicle needs no person to
+# qualify: a windshield face is captured from the vehicle's own track.
+TRACK_FRAME_LABELS = frozenset({"person", *VEHICLE_LABELS})
+
 DEFAULT_ATTRIBUTE_LABEL_MAP = {
     "person": ["amazon", "face"],
     "car": [
@@ -45,6 +57,11 @@ DEFAULT_ATTRIBUTE_LABEL_MAP = {
         "usps",
     ],
     "motorcycle": ["license_plate"],
+    # Plus vehicle classes with no generic equivalent. They carry plates like
+    # any other vehicle, and without an entry here they are absent from
+    # lp_objects, so LPR would never look at a school bus or a refuse truck.
+    "school_bus": ["license_plate"],
+    "garbage_truck": ["license_plate"],
 }
 ATTRIBUTE_LABEL_DISPLAY_MAP = {
     "amazon": "Amazon",

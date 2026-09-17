@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from frigate.api.media import calibration_frame
+from frigate.camera.state import FrozenVehicle
 from frigate.test import test_tracked_object_publication as tracked_fixture
 
 
@@ -40,7 +41,10 @@ class TestCalibrationFrame(unittest.TestCase):
         obj.obj_data["box"] = [10, 20, 30, 40]
         obj.obj_data["frame_time"] += 1
         image2, capture2, boxes2 = self.state.get_calibration_frame()
-        self.assertEqual(boxes, ((100, 100, 200, 200),))
+        self.assertEqual(
+            boxes,
+            (FrozenVehicle((100, 100, 200, 200), tracked_fixture.EVENT_ID, capture),),
+        )
         self.assertEqual(boxes2, boxes)
         self.assertEqual(capture2, capture)
         np.testing.assert_array_equal(image2, image)
@@ -110,7 +114,9 @@ class TestCalibrationFrame(unittest.TestCase):
         self.state.camera_config.detect.enabled = False
         self.assertEqual(self.capture().status_code, 404)
         self.state.camera_config.detect.enabled = True
-        self.state._current_frame_vehicles = tuple([(1, 1, 2, 2)] * 33)
+        self.state._current_frame_vehicles = tuple(
+            [FrozenVehicle((1, 1, 2, 2), "over", None)] * 33
+        )
         self.assertEqual(self.capture().status_code, 503)
 
     def test_half_millisecond_rounding_matches_the_consumer(self):

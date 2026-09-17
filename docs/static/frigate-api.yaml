@@ -5516,7 +5516,7 @@ paths:
       description: |-
         **Access:** Authenticated user with access to the referenced camera.
 
-        Returns a full, unannotated detector frame and its frozen track identity in X-Frigate-Track, with matching X-Frame-Time and X-Calibration-Frame. Only true-positive person, car, truck, bus and motorcycle tracks qualify. An explicit end returns 410; a fresh missing track returns 404 (unknown). Unavailable, stale or future frames return 503. No event-history fallback.
+        Returns a full, unannotated detector frame and its frozen track identity in X-Frigate-Track, with matching X-Frame-Time and X-Calibration-Frame. Only true-positive person and vehicle tracks qualify. X-Calibration-Frame adds the frozen tracker id and detector clock to vehicles the model actually observed on this frame, and an optional bounded 'faces' list of raw same-frame face regions. An explicit end returns 410; a fresh missing track returns 404 (unknown). Unavailable, stale or future frames return 503. No event-history fallback.
       operationId: track_frame__camera_name__tracks__track_id__frame_jpg_get
       parameters:
         - name: camera_name

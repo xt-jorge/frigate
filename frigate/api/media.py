@@ -34,7 +34,12 @@ from frigate.api.defs.query.media_query_parameters import (
     MediaMjpegFeedQueryParams,
 )
 from frigate.api.defs.tags import Tags
-from frigate.camera.state import CameraState
+from frigate.camera.state import (
+    MAX_FRAME_FACES,
+    CameraState,
+    FrozenFace,
+    FrozenVehicle,
+)
 from frigate.config import FrigateConfig
 from frigate.config.camera.snapshots import SnapshotsConfig
 from frigate.const import (
@@ -42,6 +47,7 @@ from frigate.const import (
     INSTALL_DIR,
     MAX_SEGMENT_DURATION,
     PREVIEW_FRAME_TYPE,
+    TRACK_FRAME_LABELS,
 )
 from frigate.models import Event, Previews, Recordings, Regions, ReviewSegment
 from frigate.output.preview import get_most_recent_preview_frame
@@ -56,6 +62,12 @@ from frigate.util.image import get_image_from_recording, get_image_quality_param
 from frigate.util.media import get_keyframe_before
 
 logger = logging.getLogger(__name__)
+
+# Vehicles are required header content, so exceeding the bound refuses the
+# frame. The overall budget keeps the encoded header inside the consumer's
+# 8 KiB ceiling with room to spare.
+MAX_FRAME_VEHICLES = 32
+MAX_CALIBRATION_HEADER_BYTES = 6144
 
 
 router = APIRouter(tags=[Tags.media])
@@ -182,9 +194,12 @@ async def calibration_frame(request: Request, camera_name: str):
     description=(
         "Returns a full, unannotated detector frame and its frozen track identity "
         "in X-Frigate-Track, with matching X-Frame-Time and X-Calibration-Frame. "
-        "Only true-positive person, car, truck, bus and motorcycle tracks qualify. "
-        "An explicit end returns 410; a fresh missing track returns 404 (unknown). "
-        "Unavailable, stale or future frames return 503. No event-history fallback."
+        "Only true-positive person and vehicle tracks qualify. X-Calibration-Frame "
+        "adds the frozen tracker id and detector clock to vehicles the model "
+        "actually observed on this frame, and an optional bounded 'faces' list of "
+        "raw same-frame face regions. An explicit end returns 410; a fresh missing "
+        "track returns 404 (unknown). Unavailable, stale or future frames return "
+        "503. No event-history fallback."
     ),
 )
 async def track_frame(
@@ -213,8 +228,8 @@ async def track_frame(
             status_code=503,
             headers=headers,
         )
-    frame, frame_time, track, vehicles = snapshot
-    if track is None or track[1] not in {"person", "car", "truck", "bus", "motorcycle"}:
+    frame, frame_time, track, vehicles, faces = snapshot
+    if track is None or track[1] not in TRACK_FRAME_LABELS:
         return JSONResponse(
             content={"message": "Track not present in current frame"},
             status_code=404,
@@ -249,30 +264,43 @@ async def track_frame(
             status_code=503,
             headers=headers,
         )
-    return _detector_frame_response(frame, frame_time, vehicles, headers)
+    return _detector_frame_response(
+        frame, frame_time, vehicles, headers, faces=faces, identify_vehicles=True
+    )
 
 
 def _detector_frame_response(
     frame: np.ndarray,
     frame_time: float,
-    vehicles: tuple[tuple[int, int, int, int], ...],
+    vehicles: tuple[FrozenVehicle, ...],
     headers: dict[str, str] | None = None,
+    *,
+    faces: tuple[FrozenFace, ...] | None = None,
+    identify_vehicles: bool = False,
 ):
-    """Encode copied detector pixels and their matching frozen geometry."""
+    """Encode copied detector pixels and their matching frozen geometry.
+
+    Args:
+        identify_vehicles: Whether to name the tracks the vehicle boxes came
+            from. The calibration leg deliberately publishes bare boxes and no
+            identity; only the admitted track-frame leg identifies vehicles.
+        faces: Raw same-frame face regions, or None when this frame carries no
+            face observation pass. Unlike vehicles, faces are an optional hint:
+            anything unusable about them drops the hint instead of failing an
+            otherwise valid frame, because a recognition outage in a crowd is a
+            worse answer than no hint at all.
+    """
     headers = {"Cache-Control": "private, no-store", **(headers or {})}
     # Bound header size and refuse truncation: omitted vehicles must never look
     # like a complete empty-frame detection result.
-    if len(vehicles) > 32:
+    if len(vehicles) > MAX_FRAME_VEHICLES:
         return JSONResponse(
             content={"message": "Detection limit exceeded"},
             status_code=503,
             headers=headers,
         )
     height, width = frame.shape[:2]
-    if any(
-        not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height)
-        for x1, y1, x2, y2 in vehicles
-    ):
+    if any(not _box_within(vehicle.box, width, height) for vehicle in vehicles):
         return JSONResponse(
             content={"message": "Detection geometry unavailable"},
             status_code=503,
@@ -283,21 +311,76 @@ def _detector_frame_response(
         return JSONResponse(
             content={"message": "Frame unavailable"}, status_code=503, headers=headers
         )
-    metadata = {
+    captured_at_ms = math.floor(frame_time * 1000 + 0.5)
+    metadata: dict[str, Any] = {
         "state": "matched",
-        "capturedAtMs": math.floor(frame_time * 1000 + 0.5),
+        "capturedAtMs": captured_at_ms,
         "width": width,
         "height": height,
-        "vehicles": [{"box": box} for box in vehicles],
+        # A track is named only when the model observed it on this very frame,
+        # compared raw and before rounding. Two different captures can round to
+        # the same millisecond, so rounded equality is not freshness. A reused
+        # or predicted box stays a bare box and cannot claim a target vehicle.
+        "vehicles": [
+            {
+                "box": list(vehicle.box),
+                "id": vehicle.id,
+                "detectorObservedAtMs": captured_at_ms,
+            }
+            if identify_vehicles and vehicle.detector_observed_at == frame_time
+            else {"box": list(vehicle.box)}
+            for vehicle in vehicles
+        ],
     }
+    if _usable_face_hint(faces, frame_time, width, height):
+        metadata["faces"] = [
+            {
+                "box": list(face.box),
+                "score": round(float(face.score), 4),
+                "detectorObservedAtMs": captured_at_ms,
+            }
+            for face in faces
+        ]
+    encoded_metadata = json.dumps(metadata, separators=(",", ":"))
+    if len(encoded_metadata) > MAX_CALIBRATION_HEADER_BYTES and "faces" in metadata:
+        # The vehicles this frame really has are the required part of the
+        # header, so the optional hint is what yields the budget.
+        del metadata["faces"]
+        encoded_metadata = json.dumps(metadata, separators=(",", ":"))
     return Response(
         jpg.tobytes(),
         media_type="image/jpeg",
         headers={
             **headers,
             "X-Frame-Time": str(frame_time),
-            "X-Calibration-Frame": json.dumps(metadata, separators=(",", ":")),
+            "X-Calibration-Frame": encoded_metadata,
         },
+    )
+
+
+def _box_within(box: tuple[int, int, int, int], width: int, height: int) -> bool:
+    """Whether a frozen box is a non-empty region of this decoded image."""
+    x1, y1, x2, y2 = box
+    return 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height
+
+
+def _usable_face_hint(
+    faces: tuple[FrozenFace, ...] | None,
+    frame_time: float,
+    width: int,
+    height: int,
+) -> bool:
+    """Whether the whole face hint may be published for this frame.
+
+    A hint is all or nothing. Publishing the valid part of a list would hand the
+    consumer a complete-looking set that silently omits a face, which is exactly
+    the failure an absent hint avoids.
+    """
+    if faces is None or len(faces) > MAX_FRAME_FACES:
+        return False
+    return all(
+        face.detector_observed_at == frame_time and _box_within(face.box, width, height)
+        for face in faces
     )
 
 

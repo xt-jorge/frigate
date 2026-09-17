@@ -62,17 +62,51 @@ history API. Responses use `Cache-Control: private, no-store`.
 GET /api/front/tracks/1789140000.123456-abcdef/frame.jpg
 ```
 
-For a true-positive `person`, `car`, `truck`, `bus`, or `motorcycle`, this returns
-one full, unannotated detector JPEG. It does not crop to the track. The track
-identity and pixels are copied from the same published frame under the camera's
-frame lock. The detector and camera first verify the original capture stamp of
-the shared-memory ring slot; an overwritten or busy slot is discarded.
+For a true-positive `person` or vehicle track, this returns one full, unannotated
+detector JPEG. It does not crop to the track. Vehicle labels are `car`, `truck`,
+`bus`, `motorcycle`, `school_bus`, and `garbage_truck`; the last two are Frigate+
+classes with no generic equivalent. The track identity and pixels are copied from
+the same published frame under the camera's frame lock. The detector and camera
+first verify the original capture stamp of the shared-memory ring slot; an
+overwritten or busy slot is discarded.
 
 `X-Frigate-Track` is a JSON object of at most 1024 bytes containing exactly `id`,
 `camera`, `label`, and `end_time`. `X-Frame-Time` is the original capture time in
 seconds. `X-Calibration-Frame` contains the same image dimensions, capture time
 in milliseconds, and frozen vehicle boxes used by the calibration endpoint.
 The response is private and must not be cached.
+
+### Same-frame geometry in `X-Calibration-Frame`
+
+On this route only, each `vehicles` entry additionally carries `id` and
+`detectorObservedAtMs` **when the model actually measured that box on this exact
+frame**, compared before any rounding. A box the tracker carried forward from an
+earlier measurement — a stationary or predicted vehicle — stays a bare `{"box":
+[…]}`. A vehicle without an `id` remains in the frozen tracker geometry, but its
+box was not measured on this frame, so it cannot be matched to `X-Frigate-Track.id` and
+cannot serve as a target for any spatial association. The calibration endpoint is
+unchanged and emits bare boxes with no identity.
+
+When the camera tracks `face`, the header may also carry a `faces` array of at
+most 16 raw face regions, each with `box`, the detector's `score`, and
+`detectorObservedAtMs`. These are the primary detector's own observations taken
+**before parent assignment**, so a face visible through a windshield is included
+even though no person was detected and no vehicle owns it. They are search
+regions for this image and nothing else: not an identity, not a claim that the
+face belongs to any vehicle, and not a substitute for a recognizer's own score or
+landmarks.
+
+The `faces` key is present only when a complete, in-bounds, same-frame list is
+available. It is **absent** when the camera does not track `face`, when no
+detection pass ran on this frame, when more than 16 regions were found, when any
+region fails validation against the image, or when the header would exceed its
+size budget. Absence never means "no face here" — a consumer must fall back to
+its ordinary full-frame search. An empty `faces` array means a pass ran and
+produced no region to hint with; it is likewise not a claim that the image
+contains no face, because a pass only covers that frame's detection regions. A
+partial list is never emitted. Face-region problems only withhold the hint; they
+never fail the request. Vehicle geometry is required content, so more than 32
+vehicles or a vehicle box outside the image still returns 503.
 
 The route requires access to that camera. A fresh snapshot with a missing or
 unsupported track returns HTTP 404 (unknown, retryable), and only an explicit

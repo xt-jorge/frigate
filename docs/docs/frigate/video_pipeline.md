@@ -98,6 +98,19 @@ measurement even if a later tracker event republishes it. Consumers requiring
 fresh detections must validate this original clock and their own capture,
 geometry and continuity bounds.
 
+Each entry of a tracked object's `current_attributes` carries the same field for
+the same reason. A track keeps publishing its attributes while it lives, so the
+presence of a `license_plate` region says the track has a plate somewhere, not
+that the plate is in the current pixels. License plate recognition reads a region
+only when its detector clock is exactly the frame it is cropping.
+
+The same applies to the tracked object's own box. An advancing `frame_time` means
+the tracker believes the object is still there; only a matching
+`detector_observed_at` means the model measured it there. The Frigate+ plate-locator
+fallback therefore refuses to search inside a vehicle box whose detector clock is not this frame's,
+because a plate found in carried geometry would be attributed to whichever track
+the box belongs to rather than to whichever vehicle is now in those pixels.
+
 Detector IPC binds each request to a UUID stored with its input tensor under a
 shared-memory lock. Workers copy only the matching generation before inference;
 a queued request whose input was replaced is refused. Responses carry the same
@@ -120,7 +133,9 @@ clock. The event updates do not cause additional inference.
 `width` and `height`, successful detector `coverage` rectangles in pixels, and
 all current raw filtered detector `objects` (`label`, pixel `box`, and
 `detector_observed_at`). It includes uninitialized detections and excludes
-stationary seed boxes and tracker predictions. `complete` requires successful
+stationary seed boxes, tracker predictions, and attribute detections. An
+attribute is a property of the object carrying it, so a `license_plate` or
+`face` box is never an occupant of a zone and never a second vehicle. `complete` requires successful
 coverage of every selected zone in that exact frame. Missing zones, disabled
 detection, PTZ movement, and detector failures cannot produce complete empty
 coverage. An empty object array with complete coverage is a measured empty
