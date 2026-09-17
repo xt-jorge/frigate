@@ -1948,7 +1948,7 @@ class CTCDecoder:
         self.char_map = {i: char for i, char in enumerate(self.characters)}
 
     @staticmethod
-    def _load_characters(character_dict_path: str) -> List[str]:
+    def _load_characters(character_dict_path: str) -> list[str]:
         """Read the ordered PaddleOCR label map out of an inference config.
 
         Entries are taken verbatim and in order. `str.strip()` must never be

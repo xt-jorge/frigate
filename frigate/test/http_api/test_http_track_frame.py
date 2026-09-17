@@ -343,12 +343,14 @@ class TestTrackFrameFaceHints(TestHttpTrackFrame):
 
     def test_the_calibration_leg_never_carries_faces_or_identity(self):
         self.fixture.next_frame(face_regions=(self.face(),))
-        with AuthTestClient(self.app) as client:
-            with patch(
+        with (
+            AuthTestClient(self.app) as client,
+            patch(
                 "frigate.api.media.time.time",
                 return_value=self.state.current_frame_time + 0.1,
-            ):
-                response = client.get(f"/{CAMERA}/calibration.jpg")
+            ),
+        ):
+            response = client.get(f"/{CAMERA}/calibration.jpg")
         metadata = json.loads(response.headers["x-calibration-frame"])
 
         self.assertNotIn("faces", metadata)
