@@ -120,7 +120,7 @@ class TestSlotPartition(unittest.TestCase):
         self.assertEqual(partition_frame_slots(0), (0, 0))
 
     def test_partition_never_exceeds_the_existing_budget(self):
-        for total in range(0, 65):
+        for total in range(65):
             capture, publication = partition_frame_slots(total)
             with self.subTest(total=total):
                 self.assertGreaterEqual(capture, 0)
