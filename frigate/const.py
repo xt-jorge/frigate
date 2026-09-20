@@ -21,6 +21,19 @@ PLUS_API_HOST = "https://api.frigate.video"
 
 SHM_FRAMES_VAR = "SHM_MAX_FRAMES"
 
+# A camera's per-frame SHM budget is split between two families with different
+# contracts. The capture ring holds the most recent captures and only has to
+# span capture-to-detector handoff. The publication ring holds the most recent
+# frames the detector actually published, so every downstream consumer can read
+# the exact pixels a detection was measured on instead of reopening a capture
+# slot the camera has already reused.
+#
+# Publication retention is bounded, not a lease: a slow reader may miss a
+# generation and must refuse it. These numbers are a retention choice, not a
+# proved bound on any queue depth.
+MAX_PUBLICATION_FRAMES = 6
+MIN_CAPTURE_FRAMES = 4
+
 REDACTED_CREDENTIAL_SENTINEL = "__FRIGATE_SAVED_CREDENTIAL__"
 
 # Attribute & Object constants

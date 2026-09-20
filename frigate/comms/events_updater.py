@@ -6,10 +6,16 @@ from frigate.events.types import EventStateEnum, EventTypeEnum
 
 from .zmq_proxy import Publisher, Subscriber
 
+# (source type, state, camera, frame name, frame clock, event data). The frame
+# clock is the exact capture clock of the named frame, so a subscriber reads
+# those pixels by the clock that belongs to this message. Events that name no
+# frame carry 0.0, which the exact-clock read refuses.
+EventUpdate = tuple[
+    EventTypeEnum, EventStateEnum, str | None, str, float, dict[str, Any]
+]
 
-class EventUpdatePublisher(
-    Publisher[tuple[EventTypeEnum, EventStateEnum, str | None, str, dict[str, Any]]]
-):
+
+class EventUpdatePublisher(Publisher[EventUpdate]):
     """Publishes events (objects, audio, manual)."""
 
     topic_base = "event/"
@@ -19,7 +25,7 @@ class EventUpdatePublisher(
 
     def publish(
         self,
-        payload: tuple[EventTypeEnum, EventStateEnum, str | None, str, dict[str, Any]],
+        payload: EventUpdate,
         sub_topic: str = "",
     ) -> None:
         super().publish(payload, sub_topic)

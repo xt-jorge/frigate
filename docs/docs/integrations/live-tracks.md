@@ -66,9 +66,16 @@ For a true-positive `person` or vehicle track, this returns one full, unannotate
 detector JPEG. It does not crop to the track. Vehicle labels are `car`, `truck`,
 `bus`, `motorcycle`, `school_bus`, and `garbage_truck`; the last two are Frigate+
 classes with no generic equivalent. The track identity and pixels are copied from
-the same published frame under the camera's frame lock. The detector and camera
-first verify the original capture stamp of the shared-memory ring slot; an
-overwritten or busy slot is discarded.
+the same published frame under the camera's frame lock. The detector copies a
+capture slot after verifying its original timestamp and uses those owned pixels
+through tracking. Before handing the result to other processes, it stores those
+pixels and the original timestamp in a separate publication ring. Both rings
+share the camera's existing frame-memory budget.
+
+Downstream readers verify the publication slot's exact timestamp. A slow reader
+whose frame has already expired, or a reader encountering a busy slot, discards
+that sample. Retention is bounded; it does not guarantee that every frame reaches
+every consumer or extend the five-second freshness limit.
 
 `X-Frigate-Track` is a JSON object of at most 1024 bytes containing exactly `id`,
 `camera`, `label`, and `end_time`. `X-Frame-Time` is the original capture time in

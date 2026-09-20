@@ -234,8 +234,11 @@ class OutputProcess(FrigateProcess):
             ):
                 continue
 
-            frame = frame_manager.get(
-                frame_name, self.config.cameras[camera].frame_shape_yuv
+            # Read by this message's own clock. A slot that has moved on to a
+            # newer generation is refused, never drawn against this payload's
+            # boxes and timestamp.
+            frame = frame_manager.get_captured_frame(
+                frame_name, self.config.cameras[camera].frame_shape_yuv, frame_time
             )
 
             if frame is None:
@@ -290,10 +293,10 @@ class OutputProcess(FrigateProcess):
                     frame,
                 )
 
-            frame_manager.close(frame_name)
-
         move_preview_frames("clips")
 
+        # drain any remaining detection updates; the frames they name are not
+        # needed at shutdown and exact-clock reads hold no mapping to release
         while True:
             _cleanup_result = detection_subscriber.check_for_update(timeout=0)
             if _cleanup_result is None:
@@ -302,20 +305,6 @@ class OutputProcess(FrigateProcess):
 
             if not topic or data is None:
                 break
-
-            (
-                camera,
-                frame_name,
-                frame_time,
-                current_tracked_objects,
-                motion_boxes,
-                regions,
-            ) = data
-
-            frame = frame_manager.get(
-                frame_name, self.config.cameras[camera].frame_shape_yuv
-            )
-            frame_manager.close(frame_name)
 
         detection_subscriber.stop()
 

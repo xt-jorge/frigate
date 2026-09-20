@@ -72,6 +72,7 @@ class TestOccupancyFrames(unittest.TestCase):
                 stop,
                 MagicMock(),
                 [],
+                2,
                 exit_on_empty=True,
             )
         published = []

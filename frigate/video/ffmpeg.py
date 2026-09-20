@@ -29,6 +29,7 @@ from frigate.util.ffmpeg import start_or_restart_ffmpeg, stop_ffmpeg
 from frigate.util.image import (
     FrameManager,
     SharedMemoryFrameManager,
+    capture_frame_name,
 )
 from frigate.util.process import FrigateProcess
 
@@ -73,7 +74,7 @@ def capture_frames(
             fps.value = frame_rate.eps()
             skipped_fps.value = skipped_eps.eps()
             current_frame.value = datetime.now().timestamp()
-            frame_name = f"{config.name}_frame{frame_index}"
+            frame_name = capture_frame_name(config.name, frame_index)
             try:
                 # Drain ffmpeg before locking a slot; no I/O while a reader waits.
                 pixels = ffmpeg_process.stdout.read(frame_size)

@@ -23,11 +23,7 @@ from frigate.track.stationary_classifier import (
     StationaryThresholds,
     get_stationary_threshold,
 )
-from frigate.util.image import (
-    SharedMemoryFrameManager,
-    get_histogram,
-    intersection_over_union,
-)
+from frigate.util.image import get_histogram, intersection_over_union
 from frigate.util.object import average_boxes, median_of_boxes
 
 logger = logging.getLogger(__name__)
@@ -118,7 +114,6 @@ class NorfairTracker(ObjectTracker):
         config: CameraConfig,
         ptz_metrics: PTZMetrics,
     ):
-        self.frame_manager = SharedMemoryFrameManager()
         self.tracked_objects: dict[str, dict[str, Any]] = {}
         self.untracked_object_boxes: list[list[int]] = []
         self.disappeared: dict[str, int] = {}
@@ -519,7 +514,7 @@ class NorfairTracker(ObjectTracker):
 
         self.tracked_objects[id].update(obj)
 
-    def update_frame_times(self, frame_name: str, frame_time: float) -> None:
+    def update_frame_times(self, frame: np.ndarray, frame_time: float) -> None:
         # if the object was there in the last frame, assume it's still there
         detections = [
             (
@@ -534,7 +529,7 @@ class NorfairTracker(ObjectTracker):
             if self.disappeared[id] == 0
         ]
         self.match_and_update(
-            frame_name,
+            frame,
             frame_time,
             detections=detections,
             detector_observed_at=[
@@ -546,25 +541,22 @@ class NorfairTracker(ObjectTracker):
 
     def match_and_update(
         self,
-        frame_name: str,
+        frame: np.ndarray,
         frame_time: float,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
         *,
         detector_observed_at: list[float | None] | None = None,
     ) -> None:
-        # Group detections by object type
+        # Use the caller-owned pixels while preserving the configured classifier
+        # and PTZ posture; receiving a frame must not enable a disabled classifier.
         detections_by_type: dict[str, list[Detection]] = {}
-        yuv_frame: np.ndarray | None = None
-
-        if (
-            self.ptz_metrics.autotracker_enabled.value
+        yuv_frame = (
+            frame
+            if self.ptz_metrics.autotracker_enabled.value
             or self.detect_config.stationary.classifier
-        ):
-            yuv_frame = self.frame_manager.get_captured_frame(
-                frame_name, self.camera_config.frame_shape_yuv, frame_time
-            )
-            if yuv_frame is None:
-                return
+            else None
+        )
+
         for index, obj in enumerate(detections):
             label = obj[0]
             if label not in detections_by_type:
@@ -580,7 +572,7 @@ class NorfairTracker(ObjectTracker):
             embedding = None
             if self.ptz_metrics.autotracker_enabled.value:
                 embedding = get_histogram(
-                    yuv_frame, obj[2][0], obj[2][1], obj[2][2], obj[2][3]
+                    frame, obj[2][0], obj[2][1], obj[2][2], obj[2][3]
                 )
 
             detection = Detection(
@@ -616,7 +608,7 @@ class NorfairTracker(ObjectTracker):
                 )
 
             coord_transformations = self.ptz_motion_estimator.motion_estimator(
-                detections, frame_name, frame_time, self.camera_name
+                detections, frame, frame_time, self.camera_name
             )
 
         # Update all configured trackers

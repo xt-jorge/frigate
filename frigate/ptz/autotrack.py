@@ -33,7 +33,7 @@ from frigate.ptz.onvif import OnvifController
 from frigate.track.tracked_object import TrackedObject
 from frigate.util.builtin import update_yaml_file_bulk
 from frigate.util.config import find_config_file
-from frigate.util.image import SharedMemoryFrameManager, intersection_over_union
+from frigate.util.image import intersection_over_union
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,6 @@ def transform_is_finite(coord_transformations) -> bool:
 
 class PtzMotionEstimator:
     def __init__(self, config: CameraConfig, ptz_metrics: PTZMetrics) -> None:
-        self.frame_manager = SharedMemoryFrameManager()
         self.norfair_motion_estimator = None
         self.camera_config = config
         self.coord_transformations = None
@@ -77,7 +76,7 @@ class PtzMotionEstimator:
     def motion_estimator(
         self,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
-        frame_name: str,
+        yuv_frame: np.ndarray,
         frame_time: float,
         camera: str | None,
     ):
@@ -112,14 +111,6 @@ class PtzMotionEstimator:
             logger.debug(
                 f"{camera}: Motion estimator running - frame time: {frame_time}"
             )
-
-            yuv_frame = self.frame_manager.get_captured_frame(
-                frame_name, self.camera_config.frame_shape_yuv, frame_time
-            )
-
-            if yuv_frame is None:
-                self.coord_transformations = None
-                return None
 
             frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2GRAY_I420)
 
@@ -170,8 +161,6 @@ class PtzMotionEstimator:
                 )
             except Exception:
                 pass
-
-            self.frame_manager.close(frame_name)
 
         return self.coord_transformations
 

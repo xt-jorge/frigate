@@ -77,6 +77,7 @@ class FaceRegionHarness(unittest.TestCase):
                 stop,
                 MagicMock(),
                 [],
+                2,
                 exit_on_empty=True,
             )
         payloads = []
