@@ -130,7 +130,7 @@ class CentroidTracker(ObjectTracker):
 
         self.tracked_objects[id].update(new_obj)
 
-    def update_frame_times(self, frame_name: str, frame_time: float) -> None:
+    def update_frame_times(self, frame: np.ndarray, frame_time: float) -> None:
         for id in list(self.tracked_objects.keys()):
             self.tracked_objects[id]["frame_time"] = frame_time
             self.tracked_objects[id]["motionless_count"] += 1
@@ -139,7 +139,7 @@ class CentroidTracker(ObjectTracker):
 
     def match_and_update(
         self,
-        frame_name: str,
+        frame: np.ndarray,
         frame_time: float,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
         *,

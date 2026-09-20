@@ -18,7 +18,14 @@ from frigate.const import REPLAY_CAMERA_PREFIX
 from frigate.models import Regions
 from frigate.object_detection.base import DETECTOR_REQUEST_HEADER_SIZE
 from frigate.util.builtin import empty_and_close_queue
-from frigate.util.image import SharedMemoryFrameManager, UntrackedSharedMemory
+from frigate.util.image import (
+    SharedMemoryFrameManager,
+    UntrackedSharedMemory,
+    camera_frame_slot_prefixes,
+    capture_frame_name,
+    partition_frame_slots,
+    publication_frame_name,
+)
 from frigate.util.object import get_camera_regions_grid
 from frigate.util.services import calculate_shm_requirements
 from frigate.video import CameraCapture, CameraTracker
@@ -150,6 +157,11 @@ class CameraMaintainer(threading.Thread):
                     ).close()
                 shm.close()
 
+        # Both slot families exist before either producer starts. The detector
+        # publishes into the publication family, so those slots must be created
+        # here rather than alongside the capture process, which starts second.
+        _, publication_count = self.__create_camera_frame_slots(config, runtime)
+
         camera_process = CameraTracker(
             config,
             self.config.model,
@@ -159,6 +171,7 @@ class CameraMaintainer(threading.Thread):
             self.camera_metrics[name],
             self.ptz_metrics[name],
             self.region_grids[name],
+            publication_count,
             camera_stop_event,
             self.config.logger,
         )
@@ -166,6 +179,37 @@ class CameraMaintainer(threading.Thread):
         camera_process.start()
         self.camera_metrics[name].process_pid.value = camera_process.pid
         logger.info(f"Camera processor started for {name}: {camera_process.pid}")
+
+    def __camera_frame_budget(self, runtime: bool) -> int:
+        return 10 if runtime else self.shm_count
+
+    def __create_camera_frame_slots(
+        self, config: CameraConfig, runtime: bool
+    ) -> tuple[int, int]:
+        """Create this camera's capture and publication slots within the
+        budget it already had, and report the partition."""
+        total = self.__camera_frame_budget(runtime)
+        capture_count, publication_count = partition_frame_slots(total)
+
+        if publication_count == 0:
+            logger.warning(
+                "%s: SHM frame budget of %d cannot hold both capture and "
+                "publication slots, so no frames will be published",
+                config.name,
+                total,
+            )
+
+        frame_size = config.frame_shape_yuv[0] * config.frame_shape_yuv[1]
+        for i in range(capture_count):
+            self.frame_manager.create_captured_frame(
+                capture_frame_name(config.name, i), frame_size
+            )
+        for i in range(publication_count):
+            self.frame_manager.create_captured_frame(
+                publication_frame_name(config.name, i), frame_size
+            )
+
+        return (capture_count, publication_count)
 
     def __start_camera_capture(
         self, name: str, config: CameraConfig, runtime: bool = False
@@ -176,13 +220,10 @@ class CameraMaintainer(threading.Thread):
 
         camera_stop_event = self.__ensure_camera_stop_event(name)
 
-        # pre-create shms
-        count = 10 if runtime else self.shm_count
-        for i in range(count):
-            frame_size = config.frame_shape_yuv[0] * config.frame_shape_yuv[1]
-            self.frame_manager.create_captured_frame(
-                f"{config.name}_frame{i}", frame_size
-            )
+        # Slots were created by __start_camera_processor, which always runs
+        # first; recompute the same deterministic partition for the capture
+        # ring size.
+        count, _ = partition_frame_slots(self.__camera_frame_budget(runtime))
 
         capture_process = CameraCapture(
             config,
@@ -215,8 +256,8 @@ class CameraMaintainer(threading.Thread):
                 capture_process.join()
 
     def __unlink_camera_frame_slots(self, camera: str) -> None:
-        """Drop the camera's per-frame YUV SHM segments from this
-        process's frame_manager and unlink them at the OS level.
+        """Drop the camera's capture and publication YUV SHM segments from
+        this process's frame_manager and unlink them at the OS level.
 
         Safe to call after the camera's capture/processor subprocesses
         have been joined — they no longer hold mappings, so unlink frees
@@ -225,8 +266,10 @@ class CameraMaintainer(threading.Thread):
         they call frame_manager.get with a shape that no longer fits
         (the get path drops and reopens stale refs).
         """
-        prefix = f"{camera}_frame"
-        names = [n for n in list(self.frame_manager.shm_store) if n.startswith(prefix)]
+        prefixes = camera_frame_slot_prefixes(camera)
+        names = [
+            n for n in list(self.frame_manager.shm_store) if n.startswith(prefixes)
+        ]
         for name in names:
             try:
                 self.frame_manager.delete(name)

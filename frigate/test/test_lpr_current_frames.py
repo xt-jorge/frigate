@@ -124,10 +124,10 @@ class TestCurrentLprScheduling(unittest.TestCase):
             EventTypeEnum.tracked_object,
             EventStateEnum.update,
             "a",
-            "a_frame0",
+            "a_published0",
+            1000.0,
             packet()[3][0],
         )
-        self.owner.frame_manager.get.return_value = np.zeros((48, 32), np.uint8)
         self.owner._process_updates()
         self.processor.process_frame.assert_not_called()
         self.run_packet(packet())

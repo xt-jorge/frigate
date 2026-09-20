@@ -5,6 +5,8 @@ from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 from frigate.test import test_tracked_object_publication as publication_fixture
 from frigate.track.norfair_tracker import NorfairTracker
 from frigate.video.detect import process_frames
@@ -21,7 +23,7 @@ class TestDetectorObservationTime(unittest.TestCase):
             config,
             SimpleNamespace(autotracker_enabled=SimpleNamespace(value=False)),
         )
-        self.tracker.frame_manager = MagicMock()
+        self.frame = np.zeros(config.frame_shape_yuv, dtype=np.uint8)
         self.detection = (
             "car",
             0.95,
@@ -33,7 +35,7 @@ class TestDetectorObservationTime(unittest.TestCase):
 
     def observe(self, frame, original):
         self.tracker.match_and_update(
-            "fixture", frame, [self.detection], detector_observed_at=[original]
+            self.frame, frame, [self.detection], detector_observed_at=[original]
         )
         self.assertEqual(len(self.tracker.tracked_objects), 1)
         return next(iter(self.tracker.tracked_objects.values()))
@@ -41,11 +43,11 @@ class TestDetectorObservationTime(unittest.TestCase):
     def test_refresh_prediction_and_real_detection_have_distinct_clocks(self):
         obj = self.observe(100.0, 100.0)
         identity = obj["id"]
-        self.tracker.update_frame_times("fixture", 101.0)
+        self.tracker.update_frame_times(self.frame, 101.0)
         obj = self.tracker.tracked_objects[identity]
         self.assertEqual(obj["frame_time"], 101.0)
         self.assertEqual(obj["detector_observed_at"], 100.0)
-        self.tracker.match_and_update("fixture", 102.0, [])
+        self.tracker.match_and_update(self.frame, 102.0, [])
         self.assertEqual(obj["detector_observed_at"], 100.0)
         self.assertEqual(self.tracker.disappeared[identity], 1)
         obj = self.observe(103.0, 103.0)
@@ -58,10 +60,10 @@ class TestDetectorObservationTime(unittest.TestCase):
         self.assertEqual(obj["detector_observed_at"], 103.0)
 
     def test_missing_provenance_does_not_invent_a_detector_clock(self):
-        self.tracker.match_and_update("fixture", 100.0, [self.detection])
+        self.tracker.match_and_update(self.frame, 100.0, [self.detection])
         obj = next(iter(self.tracker.tracked_objects.values()))
         self.assertIsNone(obj["detector_observed_at"])
-        self.tracker.update_frame_times("fixture", 101.0)
+        self.tracker.update_frame_times(self.frame, 101.0)
         self.assertIsNone(obj["detector_observed_at"])
 
     def test_clock_is_exposed_by_actual_tracked_event_serialization(self):
@@ -122,6 +124,7 @@ class TestDetectorObservationTime(unittest.TestCase):
                 stop,
                 MagicMock(),
                 [],
+                2,
                 exit_on_empty=True,
             )
         if occupancy:
@@ -146,13 +149,13 @@ class TestOccupancyNativeTracks(unittest.TestCase):
         self.tracker.default_tracker["static"].initialization_delay = 3
         self.tracker.trackers["car"]["static"].initialization_delay = 3
         self.tracker.match_and_update(
-            "fixture", 100.0, [self.detection], detector_observed_at=[100.0]
+            self.frame, 100.0, [self.detection], detector_observed_at=[100.0]
         )
         first = self.tracker.occupancy_tracks()[0]
         self.assertEqual(self.tracker.tracked_objects, {})
         for tick in range(1, 8):
             self.tracker.match_and_update(
-                "fixture",
+                self.frame,
                 100 + tick,
                 [self.detection],
                 detector_observed_at=[100 + tick],
@@ -165,7 +168,7 @@ class TestOccupancyNativeTracks(unittest.TestCase):
     def test_coasting_never_advances_measured_box_or_detector_clock(self):
         self.observe(100, 100)
         before = self.tracker.occupancy_tracks()
-        self.tracker.match_and_update("fixture", 101, [])
+        self.tracker.match_and_update(self.frame, 101, [])
         after = self.tracker.occupancy_tracks()
         self.assertEqual(before, after)
         self.assertEqual(after[0]["frame_time"], 100)
@@ -174,8 +177,7 @@ class TestOccupancyNativeTracks(unittest.TestCase):
         self.observe(100, 100)
         original = self.tracker.occupancy_tracks()[0]["id"]
         other = NorfairTracker(self.tracker.camera_config, self.tracker.ptz_metrics)
-        other.frame_manager = MagicMock()
         other.match_and_update(
-            "fixture", 101, [self.detection], detector_observed_at=[101]
+            self.frame, 101, [self.detection], detector_observed_at=[101]
         )
         self.assertNotEqual(original, other.occupancy_tracks()[0]["id"])

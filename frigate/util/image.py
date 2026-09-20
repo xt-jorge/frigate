@@ -17,9 +17,48 @@ import cv2
 import numpy as np
 from unidecode import unidecode
 
-from frigate.const import VEHICLE_LABELS
+from frigate.const import MAX_PUBLICATION_FRAMES, MIN_CAPTURE_FRAMES, VEHICLE_LABELS
 
 logger = logging.getLogger(__name__)
+
+
+def partition_frame_slots(total: int) -> tuple[int, int]:
+    """Split one camera's existing SHM frame budget into capture and
+    publication slots.
+
+    Returns (capture_count, publication_count). The sum never exceeds
+    ``total``: this repair reallocates the budget the camera already had and
+    must never quietly allocate beyond it.
+
+    A budget that cannot hold at least one slot of each family yields (0, 0).
+    That is an explicit refusal, not a silent partial allocation — the camera
+    publishes nothing rather than publishing a descriptor with no pixels
+    behind it.
+    """
+    if total < 2:
+        return (0, 0)
+
+    publication = min(
+        MAX_PUBLICATION_FRAMES,
+        max(1, total - MIN_CAPTURE_FRAMES),
+        total - 1,
+    )
+    return (total - publication, publication)
+
+
+def capture_frame_name(camera: str, index: int) -> str:
+    """Name of a capture ring slot: the most recent camera captures."""
+    return f"{camera}_frame{index}"
+
+
+def publication_frame_name(camera: str, index: int) -> str:
+    """Name of a publication ring slot: the pixels a detection was measured on."""
+    return f"{camera}_published{index}"
+
+
+def camera_frame_slot_prefixes(camera: str) -> tuple[str, str]:
+    """Both slot-family name prefixes owned by one camera."""
+    return (f"{camera}_frame", f"{camera}_published")
 
 
 def transliterate_to_latin(text: str) -> str:

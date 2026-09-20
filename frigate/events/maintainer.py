@@ -96,7 +96,7 @@ class EventProcessor(threading.Thread):
             if update == None:
                 continue
 
-            source_type, event_type, camera, _, event_data = update  # type: ignore[misc]
+            source_type, event_type, camera, _, _, event_data = update  # type: ignore[misc]
 
             logger.debug(
                 f"Event received: {source_type} {event_type} {camera} {event_data['id']}"

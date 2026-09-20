@@ -35,6 +35,7 @@ from frigate.util.image import (
     FrameManager,
     SharedMemoryFrameManager,
     draw_box_with_label,
+    publication_frame_name,
 )
 from frigate.util.model import OCCUPANCY_CANDIDATE_MIN_SCORE
 from frigate.util.object import (
@@ -72,6 +73,7 @@ class CameraTracker(FrigateProcess):
         camera_metrics: CameraMetrics,
         ptz_metrics: PTZMetrics,
         region_grid: list[list[dict[str, Any]]],
+        publication_frame_count: int,
         stop_event: MpEvent,
         log_config: LoggerConfig | None = None,
     ) -> None:
@@ -89,6 +91,7 @@ class CameraTracker(FrigateProcess):
         self.camera_metrics = camera_metrics
         self.ptz_metrics = ptz_metrics
         self.region_grid = region_grid
+        self.publication_frame_count = publication_frame_count
         self.log_config = log_config
 
     def run(self) -> None:
@@ -133,6 +136,7 @@ class CameraTracker(FrigateProcess):
             self.stop_event,
             self.ptz_metrics,
             self.region_grid,
+            self.publication_frame_count,
         )
 
         # empty the frame queue
@@ -210,6 +214,7 @@ def process_frames(
     stop_event: MpEvent,
     ptz_metrics: PTZMetrics,
     region_grid: list[list[dict[str, Any]]],
+    publication_frame_count: int,
     exit_on_empty: bool = False,
 ):
     next_region_update = get_tomorrow_at_time(2)
@@ -234,6 +239,7 @@ def process_frames(
     )
     last_occupancy_frame = float("-inf")
     camera_enabled = True
+    publication_index = 0
 
     region_min_size = get_min_region_size(model_config)
 
@@ -345,7 +351,7 @@ def process_frames(
 
         # if detection is disabled
         if not camera_config.detect.enabled:
-            object_tracker.match_and_update(frame_name, frame_time, [])
+            object_tracker.match_and_update(frame, frame_time, [])
         else:
             # get stationary object ids
             # check every Nth frame for stationary objects
@@ -515,7 +521,7 @@ def process_frames(
                 ]
                 # now that we have refined our detections, we need to track objects
                 object_tracker.match_and_update(
-                    frame_name,
+                    frame,
                     frame_time,
                     tracked_detections,
                     detector_observed_at=[
@@ -524,7 +530,7 @@ def process_frames(
                 )
             # else, just update the frame times for the stationary objects
             else:
-                object_tracker.update_frame_times(frame_name, frame_time)
+                object_tracker.update_frame_times(frame, frame_time)
 
         if occupancy_due:
             if not camera_config.detect.enabled or not occupancy_stable:
@@ -677,25 +683,41 @@ def process_frames(
             )
         # add to the queue if not full
         if detected_objects_queue.full():
-            frame_manager.close(frame_name)
             continue
-        else:
-            fps_tracker.update()
-            camera_metrics.process_fps.value = fps_tracker.eps()
-            detected_objects_queue.put(
-                (
-                    camera_config.name,
-                    frame_name,
-                    frame_time,
-                    detections,
-                    motion_boxes,
-                    regions,
-                    occupancy,
-                    face_regions,
-                )
+
+        # Hand the exact pixels this detection was measured on to every
+        # downstream consumer. The capture slot the frame arrived in is already
+        # being reused by the camera; publishing its name would make consumers
+        # reopen a slot that no longer holds this frame. The original capture
+        # clock rides along unchanged so every consumer still reads by the exact
+        # clock that belongs to this measurement.
+        if publication_frame_count < 1:
+            continue
+
+        published_name = publication_frame_name(camera_config.name, publication_index)
+        if not frame_manager.write_captured_frame(
+            published_name, frame.tobytes(), frame_time
+        ):
+            # Never publish a descriptor with no pixels behind it.
+            logger.debug(f"{camera_config.name}: could not publish frame {frame_time}")
+            continue
+        publication_index = (publication_index + 1) % publication_frame_count
+
+        fps_tracker.update()
+        camera_metrics.process_fps.value = fps_tracker.eps()
+        detected_objects_queue.put(
+            (
+                camera_config.name,
+                published_name,
+                frame_time,
+                detections,
+                motion_boxes,
+                regions,
+                occupancy,
+                face_regions,
             )
-            camera_metrics.detection_fps.value = object_detector.fps.eps()
-            frame_manager.close(frame_name)
+        )
+        camera_metrics.detection_fps.value = object_detector.fps.eps()
 
     motion_detector.stop()
     requestor.stop()
