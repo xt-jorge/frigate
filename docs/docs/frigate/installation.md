@@ -552,6 +552,7 @@ The official docker image tags for the current stable version are:
 - `stable` - Standard Frigate build for amd64 & RPi Optimized Frigate build for arm64. This build includes support for Hailo devices as well.
 - `stable-standard-arm64` - Standard Frigate build for arm64
 - `stable-tensorrt` - Frigate build specific for amd64 devices running an Nvidia GPU
+- `stable-onnx-cuda` - The same amd64 Nvidia GPU image as `stable-tensorrt`, published under a second tag that names the execution provider the `onnx` detector actually uses there. With `device: AUTO` the ONNX detector runs on the CUDA execution provider; the TensorRT provider is opt-in (`device: Tensorrt`). Pull whichever tag you prefer — they are the same digest.
 - `stable-rocm` - Frigate build for [AMD GPUs](../configuration/object_detectors.md#amdrocm-gpu-detector)
 
 The community supported docker image tags for the current stable version are:
