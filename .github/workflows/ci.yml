@@ -169,6 +169,7 @@ jobs:
           files: docker/tensorrt/trt.hcl
           set: |
             tensorrt.tags=${{ steps.setup.outputs.image-name }}-tensorrt
+            tensorrt.tags=${{ steps.setup.outputs.image-name }}-onnx-cuda
             *.cache-from=type=registry,ref=${{ steps.setup.outputs.cache-name }}-tensorrt
             *.cache-to=type=registry,ref=${{ steps.setup.outputs.cache-name }}-tensorrt,mode=max
       - name: AMD/ROCm general build
