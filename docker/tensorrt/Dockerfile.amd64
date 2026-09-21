@@ -6,6 +6,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Globally set pip break-system-packages option to avoid having to specify it every time
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 
+ARG BAKE_MODEL_CACHE=0
+
 FROM wheels AS trt-wheels
 ARG PIP_BREAK_SYSTEM_PACKAGES
 
@@ -17,6 +19,18 @@ COPY docker/main/requirements-wheels.txt /requirements-wheels.txt
 RUN  sed -i '/\[.*\]/d' /requirements-wheels.txt \
     && pip3 wheel --wheel-dir=/trt-wheels -c /requirements-wheels.txt -r /requirements-tensorrt.txt
 
+# Model files Frigate would otherwise download on first use (license plate
+# recognition, face recognition, bird classification). Identical stage, script
+# and pinned inputs as docker/tensorrt/Dockerfile.arm64; the seeded files are
+# ONNX/TFLite/YAML/text, so the same bytes serve both architectures. Gated so an
+# upstream-shaped build is unchanged and only the opted-in release grows by the
+# ~490 MB.
+FROM wget AS model-cache
+ARG BAKE_MODEL_CACHE
+RUN --mount=type=bind,source=docker/tensorrt/bake_model_cache.sh,target=/deps/bake_model_cache.sh \
+    mkdir -p /rootfs/model_cache_seed \
+    && if [ "${BAKE_MODEL_CACHE}" = "1" ]; then sh /deps/bake_model_cache.sh /rootfs/model_cache_seed; fi
+
 FROM deps AS frigate-tensorrt
 ARG PIP_BREAK_SYSTEM_PACKAGES
 
@@ -26,6 +40,15 @@ RUN --mount=type=bind,from=trt-wheels,source=/trt-wheels,target=/deps/trt-wheels
 
 COPY --from=rootfs / /
 COPY docker/tensorrt/detector/rootfs/etc/ld.so.conf.d /etc/ld.so.conf.d
+
+# The baked seed plus the oneshot that copies it into /config/model_cache before
+# Frigate starts. Only these two service paths are taken from the detector
+# rootfs: trt-model-prepare is a Jetson-only YOLO engine builder and must not be
+# pulled into this image.
+COPY --from=model-cache /rootfs/model_cache_seed /model_cache_seed
+COPY docker/tensorrt/detector/rootfs/etc/s6-overlay/s6-rc.d/model-cache-seed /etc/s6-overlay/s6-rc.d/model-cache-seed
+COPY docker/tensorrt/detector/rootfs/etc/s6-overlay/s6-rc.d/frigate/dependencies.d/model-cache-seed /etc/s6-overlay/s6-rc.d/frigate/dependencies.d/model-cache-seed
+
 RUN ldconfig
 
 WORKDIR /opt/frigate/
